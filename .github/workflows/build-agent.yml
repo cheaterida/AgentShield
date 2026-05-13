@@ -37,9 +37,7 @@ jobs:
         run: cargo build --release --target x86_64-unknown-linux-musl -p agent-runtime
 
       - name: Install Rust nightly (for eBPF)
-        run: |
-          rustup toolchain install nightly --component rust-src
-          rustup target add bpfel-unknown-none --toolchain nightly
+        run: rustup toolchain install nightly --component rust-src
 
       - name: Install bpf-linker
         run: cargo install bpf-linker
