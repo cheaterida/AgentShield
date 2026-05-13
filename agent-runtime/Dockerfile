@@ -26,11 +26,10 @@ RUN cargo build --release --target x86_64-unknown-linux-musl -p agent-runtime
 
 # ── Stage 2: eBPF bytecode builder ──
 FROM rust:1.80-bookworm AS ebpf-builder
-RUN apt-get update && apt-get install -y libssl-dev pkg-config curl && \
-    rustup target add bpfel-unknown-none
-# Install bpf-linker via cargo-binstall (pre-built binary, fast + reliable)
-RUN curl -L --proto '=https' --tlsv1.2 -sSf \
-    https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+RUN rustup target add bpfel-unknown-none
+# Install cargo-binstall (pre-built binary, no system deps)
+ADD https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh /tmp/install-binstall.sh
+RUN bash /tmp/install-binstall.sh
 RUN cargo binstall bpf-linker --no-confirm
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
