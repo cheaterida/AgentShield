@@ -15,11 +15,9 @@ pub struct ProbeEvent {
     pub retval: i64,
 }
 
-// Safety: ProbeEvent is repr(C) and contains only Copy types.
-unsafe impl aya_ebpf::Pod for ProbeEvent {}
 
 impl ProbeEvent {                                 
-    
+
     pub fn syscall_str(&self) -> &str {
         core::str::from_utf8(&self.syscall)
             .unwrap_or("<unknown>")
