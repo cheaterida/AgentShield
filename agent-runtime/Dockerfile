@@ -26,8 +26,9 @@ RUN cargo build --release --target x86_64-unknown-linux-musl -p agent-runtime
 
 # ── Stage 2: eBPF bytecode builder ──
 FROM rust:1.80-bookworm AS ebpf-builder
-RUN rustup target add bpfel-unknown-none && \
-    cargo install bpf-linker --version 0.9.12
+RUN apt-get update && apt-get install -y libssl-dev pkg-config && \
+    rustup target add bpfel-unknown-none && \
+    cargo install bpf-linker
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY ebpf-probes/agentshield-ebpf/Cargo.toml ./ebpf-probes/agentshield-ebpf/
