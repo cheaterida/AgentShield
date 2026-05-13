@@ -3,11 +3,6 @@ name: Build & Push Agent Image
 on:
   push:
     branches: [main]
-    paths:
-      - 'agent-runtime/**'
-      - 'ebpf-probes/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
   workflow_dispatch:
 
 env:
