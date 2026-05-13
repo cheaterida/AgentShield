@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package agentshield.v1;
+
+option go_package = "agentshield.dev/agentshield/shared/gen/go/agentshieldv1";
+
+// 家庭组：业务维度的云计算机与成员绑定，供服务端编排与审计关联。
+message FamilyGroup {
+  string id = 1;
+  string display_name = 2;
+  repeated string member_principal_ids = 3;
+  map<string, string> labels = 4;
+}

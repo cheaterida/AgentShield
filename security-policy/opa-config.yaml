@@ -1,0 +1,4 @@
+# OPA 启动配置占位：本地开发可直接 `opa run --server ./policies`；
+# 生产再把 bundle 地址与签名策略接入 CI。
+decision_logs:
+  console: true

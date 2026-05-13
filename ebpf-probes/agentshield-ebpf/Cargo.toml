@@ -1,0 +1,29 @@
+[package]
+name = "agentshield-ebpf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "eBPF 探针（Aya）；可与 libbpf C 探针并存于 libbpf-c"
+
+[[bin]]
+name = "agentshield-ebpf"
+path = "src/main.rs"
+
+[dependencies]
+aya-ebpf = { workspace = true }
+agentshield-ebpf-common = { path = "../agentshield-ebpf-common" }
+
+[profile.dev]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = "abort"
+incremental = false
+codegen-units = 1
+
+[profile.release]
+lto = true
+panic = "abort"
+codegen-units = 1

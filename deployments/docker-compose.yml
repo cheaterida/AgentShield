@@ -1,0 +1,153 @@
+# ── AgentShield Docker Compose — 本地联调与 PoC 部署 ──
+# 启动全栈: docker compose --profile full up -d
+# 仅核心:   docker compose --profile core up -d
+# OPA+策略: docker compose --profile policy up -d
+# 图数据库: docker compose --profile graph up -d
+# ML管线:   docker compose --profile ml up -d
+# 客户端:   docker compose --profile agent up -d
+# 生产部署: docker compose --profile prod up -d
+
+services:
+  # ── 数据面代理 ──
+  envoy:
+    image: envoyproxy/envoy:v1.31-latest
+    profiles: ["full"]
+    volumes:
+      - ../gateway/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "8443:8443"
+    command: ["-c", "/etc/envoy/envoy.yaml"]
+    depends_on:
+      - gateway
+
+  # ── 边缘网关 ──
+  gateway:
+    build:
+      context: ../gateway
+      dockerfile: ../management-server/Dockerfile
+    image: agentshield/gateway:dev
+    profiles: ["full"]
+    ports:
+      - "18080:18080"
+    environment:
+      LISTEN_ADDR: ":18080"
+      MANAGEMENT_SERVER_URL: "http://management-server:8080"
+      WEBHOOK_SECRET: "${WEBHOOK_SECRET:-}"
+    depends_on:
+      - management-server
+
+  # ── 监管中心（核心） ──
+  management-server:
+    build:
+      context: ../management-server
+      dockerfile: Dockerfile
+    image: agentshield/management-server:dev
+    profiles: ["full", "core", "prod"]
+    environment:
+      LISTEN_ADDR: ":8080"
+      AGENTSHIELD_HTTP_ADDR: ":8080"
+      AGENTSHIELD_GRPC_ADDR: ":9090"
+      AGENTSHIELD_DB_DRIVER: "sqlite"
+      AGENTSHIELD_SQLITE_PATH: "/data/agentshield.db"
+      AGENTSHIELD_OPA_BASE_URL: "http://opa:8181"
+      AGENTSHIELD_ML_PIPELINE_URL: "http://ml-pipeline:8090"
+      AGENTSHIELD_LOG_LEVEL: "info"
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    volumes:
+      - agentshield_data:/data
+      - policy_data:/policies:ro
+    depends_on:
+      - opa
+
+  # ── OPA 策略引擎 ──
+  opa:
+    image: openpolicyagent/opa:latest
+    profiles: ["full", "core", "policy", "prod"]
+    command: ["run", "--server", "--addr=:8181", "/policies"]
+    volumes:
+      - ../security-policy/policies:/policies:ro
+    ports:
+      - "8181:8181"
+
+  # ── 图数据库（CFG 分析） ──
+  neo4j:
+    image: neo4j:5-community
+    profiles: ["graph"]
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme}
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+
+  # ── ML 推理与训练管线 ──
+  ml-pipeline:
+    build:
+      context: ..
+      dockerfile: ml-pipeline/Dockerfile
+    image: agentshield/ml-pipeline:dev
+    profiles: ["full", "ml", "prod"]
+    ports:
+      - "8090:8090"
+    environment:
+      UVICORN_HOST: "0.0.0.0"
+      UVICORN_PORT: "8090"
+      AGENTSHIELD_ML_MODEL_PATH: "/app/models/cae_checkpoint.pt"
+    volumes:
+      - ml_models:/app/models
+      - ml_policies:/app/policies
+    depends_on:
+      - management-server
+
+  # ── Agent Runtime 开发模式 ──
+  agent-runtime:
+    build:
+      context: ..
+      dockerfile: agent-runtime/Dockerfile
+    image: agentshield/agent:dev
+    profiles: ["dev", "agent"]
+    pid: "host"
+    privileged: true
+    environment:
+      AGENTSHIELD_AGENT_ID: "dev-agent-001"
+      AGENTSHIELD_FAMILY_GROUP_ID: "dev-fg"
+      AGENTSHIELD_DISPLAY_NAME: "Development Agent"
+      AGENTSHIELD_MGMT_ADDR: "http://management-server:8080"
+      AGENTSHIELD_HEARTBEAT_INTERVAL_SECS: "10"
+      AGENTSHIELD_EVENT_BATCH_SIZE: "50"
+      AGENTSHIELD_EVENT_UPLOAD_INTERVAL_SECS: "30"
+      RUST_LOG: "info"
+    depends_on:
+      - management-server
+
+  # ── 生产级 Agent Runtime（客户端分发镜像） ──
+  agent-runtime-prod:
+    build:
+      context: ..
+      dockerfile: agent-runtime/Dockerfile
+    image: agentshield/agent:latest
+    profiles: ["prod"]
+    pid: "host"
+    privileged: true
+    environment:
+      AGENTSHIELD_AGENT_ID: "${AGENTSHIELD_AGENT_ID:-prod-agent-001}"
+      AGENTSHIELD_FAMILY_GROUP_ID: "${AGENTSHIELD_FAMILY_GROUP_ID:-prod-fg}"
+      AGENTSHIELD_DISPLAY_NAME: "${AGENTSHIELD_DISPLAY_NAME:-Production Agent}"
+      AGENTSHIELD_MGMT_ADDR: "${AGENTSHIELD_MGMT_ADDR:-http://management-server:8080}"
+      AGENTSHIELD_HEARTBEAT_INTERVAL_SECS: "${AGENTSHIELD_HEARTBEAT_INTERVAL_SECS:-10}"
+      AGENTSHIELD_EVENT_BATCH_SIZE: "${AGENTSHIELD_EVENT_BATCH_SIZE:-100}"
+      AGENTSHIELD_EVENT_UPLOAD_INTERVAL_SECS: "${AGENTSHIELD_EVENT_UPLOAD_INTERVAL_SECS:-30}"
+      AGENTSHIELD_EBPF_OBJECT: "/usr/local/lib/agentshield/ebpf/agentshield-ebpf.o"
+      RUST_LOG: "${RUST_LOG:-info}"
+    depends_on:
+      - management-server
+
+volumes:
+  agentshield_data:
+  neo4j_data:
+  ml_models:
+  ml_policies:
+  policy_data:

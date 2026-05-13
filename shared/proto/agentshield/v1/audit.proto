@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package agentshield.v1;
+
+option go_package = "agentshield.dev/agentshield/shared/gen/go/agentshieldv1";
+
+// 合法访问与探针关联日志的上报单元（具体 RPC 在 audit_service.proto 扩展）。
+message AccessAuditEvent {
+  string event_id = 1;
+  // RFC3339，便于无 googleapis 依赖的裸 protoc 编译
+  string occurred_at_rfc3339 = 2;
+  string family_group_id = 3;
+  string agent_id = 4;
+  string resource_ref = 5;
+  string action = 6;
+  map<string, string> attributes = 7;
+}

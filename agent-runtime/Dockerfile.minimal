@@ -1,0 +1,31 @@
+# ── AgentShield Agent Runtime (minimal) ──
+# 使用已编译的二进制快速打包，适合分发到客户端
+#
+# 构建: docker build -t agentshield/agent:latest -f agent-runtime/Dockerfile.minimal .
+# 运行: docker run -d --pid=host --privileged \
+#          -e AGENTSHIELD_AGENT_ID="worker-01" \
+#          -e AGENTSHIELD_FAMILY_GROUP_ID="fg-001" \
+#          -e AGENTSHIELD_MGMT_ADDR="http://<管理端IP>:8080" \
+#          agentshield/agent:latest
+
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates libgcc
+
+# 复制预编译的 agent-runtime 二进制
+COPY target/release/agent-runtime /usr/local/bin/agent-runtime
+
+# 复制 eBPF 探针字节码（如已编译）
+COPY ebpf-probes/agentshield-ebpf/target/bpfel-unknown-none/release/agentshield-ebpf \
+     /usr/local/lib/agentshield/ebpf/agentshield-ebpf.o 2>/dev/null || true
+
+# 复制入口脚本
+COPY agent-runtime/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+RUN addgroup -S agentshield && adduser -S agentshield -G agentshield && \
+    mkdir -p /etc/agentshield/policy-cache && \
+    chown -R agentshield:agentshield /etc/agentshield
+
+USER agentshield
+ENTRYPOINT ["/entrypoint.sh"]

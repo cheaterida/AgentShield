@@ -1,0 +1,292 @@
+syntax = "proto3";
+
+package agentshield.v1;
+
+option go_package = "agentshield.dev/agentshield/shared/gen/go/agentshieldv1";
+
+import "agentshield/v1/common.proto";
+import "agentshield/v1/family_group.proto";
+import "agentshield/v1/audit.proto";
+import "agentshield/v1/policy.proto";
+
+// ── Agent resource ──
+
+message AgentResource {
+  string id = 1;
+  string family_group_id = 2;
+  string display_name = 3;
+  map<string, string> labels = 4;
+  string status = 5;            // online|offline|suspicious|degraded
+  double risk_score = 6;        // 0.0 to 1.0
+  string last_heartbeat_at_rfc3339 = 7;
+  string registered_at_rfc3339 = 8;
+}
+
+// ── Risk alert ──
+
+message RiskAlert {
+  string alert_id = 1;
+  string family_group_id = 2;
+  string agent_id = 3;
+  string severity = 4;          // low|medium|high|critical
+  string title = 5;
+  string description = 6;
+  string status = 7;            // open|acknowledged|resolved|dismissed
+  string occurred_at_rfc3339 = 8;
+  string resolved_at_rfc3339 = 9;
+}
+
+// ── Dashboard ──
+
+message DashboardStats {
+  int32 agent_count = 1;
+  int32 online_agent_count = 2;
+  int32 suspicious_agent_count = 3;
+  int32 event_rate_last_hour = 4;
+  int32 open_alert_count = 5;
+  int32 critical_alert_count = 6;
+  repeated RiskAlert recent_alerts = 7;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FamilyGroup messages
+// ═══════════════════════════════════════════════════════════════
+
+message CreateFamilyGroupRequest {
+  string id = 1;
+  string display_name = 2;
+  repeated string member_principal_ids = 3;
+  map<string, string> labels = 4;
+}
+
+message GetFamilyGroupRequest {
+  string id = 1;
+}
+
+message ListFamilyGroupsRequest {
+  Pagination pagination = 1;
+}
+
+message ListFamilyGroupsResponse {
+  repeated FamilyGroup groups = 1;
+  int32 total = 2;
+}
+
+message UpdateFamilyGroupRequest {
+  string id = 1;
+  string display_name = 2;
+  repeated string member_principal_ids = 3;
+  map<string, string> labels = 4;
+}
+
+message DeleteFamilyGroupRequest {
+  string id = 1;
+}
+
+message DeleteFamilyGroupResponse {
+  bool deleted = 1;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Agent messages
+// ═══════════════════════════════════════════════════════════════
+
+message RegisterAgentRequest {
+  string id = 1;
+  string family_group_id = 2;
+  string display_name = 3;
+  map<string, string> labels = 4;
+}
+
+message GetAgentRequest {
+  string id = 1;
+}
+
+message ListAgentsRequest {
+  string family_group_id = 1;
+  string status = 2;
+  Pagination pagination = 3;
+}
+
+message ListAgentsResponse {
+  repeated AgentResource agents = 1;
+  int32 total = 2;
+}
+
+message UpdateAgentStatusRequest {
+  string id = 1;
+  string status = 2;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Heartbeat (bidi streaming)
+// ═══════════════════════════════════════════════════════════════
+
+message AgentHeartbeatRequest {
+  string agent_id = 1;
+  double cpu_percent = 2;
+  uint64 memory_bytes = 3;
+  int32 active_probes = 4;
+  string local_policy_version = 5;
+  int32 buffered_event_count = 6;
+}
+
+message AgentHeartbeatResponse {
+  bool acknowledged = 1;
+  string latest_policy_version = 2;
+  string suggested_action = 3;  // ok|update_policy|restart_probe|isolate
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Audit event messages
+// ═══════════════════════════════════════════════════════════════
+
+message IngestAuditEventsRequest {
+  string agent_id = 1;
+  repeated AccessAuditEvent events = 2;
+}
+
+message IngestAuditEventsResponse {
+  int32 accepted = 1;
+}
+
+message ListAuditEventsRequest {
+  string agent_id = 1;
+  string family_group_id = 2;
+  string action = 3;
+  TimestampFilter time = 4;
+  Pagination pagination = 5;
+}
+
+message ListAuditEventsResponse {
+  repeated AccessAuditEvent events = 1;
+  int32 total = 2;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Policy bundle messages
+// ═══════════════════════════════════════════════════════════════
+
+message WatchPolicyBundleRequest {
+  string agent_id = 1;
+  string current_policy_version = 2;
+}
+
+message CreatePolicyBundleRequest {
+  string version = 1;
+  bytes payload = 2;
+  string digest = 3;
+}
+
+message ActivatePolicyBundleRequest {
+  string version = 1;
+}
+
+message ListPolicyBundlesResponse {
+  repeated PolicyBundle bundles = 1;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Risk alert messages
+// ═══════════════════════════════════════════════════════════════
+
+message ListRiskAlertsRequest {
+  string family_group_id = 1;
+  string severity = 2;
+  string status = 3;
+  Pagination pagination = 4;
+}
+
+message ListRiskAlertsResponse {
+  repeated RiskAlert alerts = 1;
+  int32 total = 2;
+}
+
+message UpdateRiskAlertRequest {
+  string alert_id = 1;
+  string status = 2;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Dashboard messages
+// ═══════════════════════════════════════════════════════════════
+
+message GetDashboardStatsRequest {
+  string family_group_id = 1;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Error handler messages
+// ═══════════════════════════════════════════════════════════════
+
+message NotifyIncidentRequest {
+  string alert_id = 1;
+  string agent_id = 2;
+  string family_group_id = 3;
+  string severity = 4;
+  string description = 5;
+}
+
+message NotifyIncidentResponse {
+  string incident_id = 1;
+  string initial_action = 2;    // rollback|degrade|circuit_break|none
+  string detail = 3;
+}
+
+message GetIncidentStatusRequest {
+  string incident_id = 1;
+}
+
+message IncidentStatus {
+  string incident_id = 1;
+  string state = 2;             // active|rollback_complete|degraded|resolved
+  string resolution = 3;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ManagementService — 监管中心主服务
+// ═══════════════════════════════════════════════════════════════
+
+service ManagementService {
+  // Health
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // FamilyGroup CRUD
+  rpc CreateFamilyGroup(CreateFamilyGroupRequest) returns (FamilyGroup);
+  rpc GetFamilyGroup(GetFamilyGroupRequest) returns (FamilyGroup);
+  rpc ListFamilyGroups(ListFamilyGroupsRequest) returns (ListFamilyGroupsResponse);
+  rpc UpdateFamilyGroup(UpdateFamilyGroupRequest) returns (FamilyGroup);
+  rpc DeleteFamilyGroup(DeleteFamilyGroupRequest) returns (DeleteFamilyGroupResponse);
+
+  // Agent management
+  rpc RegisterAgent(RegisterAgentRequest) returns (AgentResource);
+  rpc GetAgent(GetAgentRequest) returns (AgentResource);
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+  rpc UpdateAgentStatus(UpdateAgentStatusRequest) returns (AgentResource);
+
+  // Agent heartbeat (bidi streaming)
+  rpc AgentHeartbeat(stream AgentHeartbeatRequest) returns (stream AgentHeartbeatResponse);
+
+  // Audit events
+  rpc IngestAuditEvents(IngestAuditEventsRequest) returns (IngestAuditEventsResponse);
+  rpc ListAuditEvents(ListAuditEventsRequest) returns (ListAuditEventsResponse);
+
+  // Policy distribution (server-side streaming)
+  rpc WatchPolicyBundle(WatchPolicyBundleRequest) returns (stream PolicyBundle);
+
+  // Policy bundle management
+  rpc CreatePolicyBundle(CreatePolicyBundleRequest) returns (PolicyBundle);
+  rpc ActivatePolicyBundle(ActivatePolicyBundleRequest) returns (PolicyBundle);
+  rpc ListPolicyBundles(Empty) returns (ListPolicyBundlesResponse);
+
+  // Risk alerts
+  rpc ListRiskAlerts(ListRiskAlertsRequest) returns (ListRiskAlertsResponse);
+  rpc UpdateRiskAlert(UpdateRiskAlertRequest) returns (RiskAlert);
+
+  // Dashboard
+  rpc GetDashboardStats(GetDashboardStatsRequest) returns (DashboardStats);
+
+  // Error handler integration
+  rpc NotifyIncident(NotifyIncidentRequest) returns (NotifyIncidentResponse);
+  rpc GetIncidentStatus(GetIncidentStatusRequest) returns (IncidentStatus);
+}

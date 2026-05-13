@@ -1,0 +1,17 @@
+[package]
+name = "agentshield-loader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "加载并附加 agentshield-ebpf（用户态，Aya）"
+
+[[bin]]
+name = "agentshield-loader"
+path = "src/main.rs"
+
+[dependencies]
+aya = { workspace = true }
+agentshield-ebpf-common = { path = "../agentshield-ebpf-common" }
+tokio = { workspace = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true

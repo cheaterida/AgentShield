@@ -1,0 +1,19 @@
+[package]
+name = "agent-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "员工侧 Agent 运行时：探针生命周期、策略缓存、与管控平面对接"
+
+[[bin]]
+name = "agent-runtime"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

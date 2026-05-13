@@ -1,0 +1,7 @@
+# eBPF 链接需要 Linux 环境与 bpf-linker；CI 中构建 agentshield-ebpf 时启用。
+# 参考：https://aya-rs.dev/book/start/
+
+[build]
+# 仅在构建 ebpf 程序时切换目标，例如：
+# rustup target add bpfel-unknown-none
+# cargo build -p agentshield-ebpf --target bpfel-unknown-none

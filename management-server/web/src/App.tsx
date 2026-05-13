@@ -1,0 +1,123 @@
+import { useContext } from 'react';
+import { NavLink, Outlet, Route, Routes } from 'react-router-dom';
+import {
+  LayoutDashboard,
+  Bot,
+  ScrollText,
+  AlertTriangle,
+  Shield,
+  Users,
+  Wifi,
+  WifiOff,
+} from 'lucide-react';
+import { WebSocketContext } from './context/WebSocketContext';
+import { DashboardPage } from './pages/DashboardPage';
+import { AgentsPage } from './pages/AgentsPage';
+import { AgentDetailPage } from './pages/AgentDetailPage';
+import { AuditLogPage } from './pages/AuditLogPage';
+import { AlertsPage } from './pages/AlertsPage';
+import { PoliciesPage } from './pages/PoliciesPage';
+import { FamilyGroupsPage } from './pages/FamilyGroupsPage';
+
+const navItems = [
+  { to: '/', icon: LayoutDashboard, label: '仪表盘' },
+  { to: '/agents', icon: Bot, label: '智能体' },
+  { to: '/audit-log', icon: ScrollText, label: '审计日志' },
+  { to: '/alerts', icon: AlertTriangle, label: '安全告警' },
+  { to: '/policies', icon: Shield, label: '策略管理' },
+  { to: '/family-groups', icon: Users, label: '家庭组' },
+];
+
+const navStyle: Record<string, React.CSSProperties> = {
+  sidebar: {
+    width: 220,
+    minHeight: '100vh',
+    background: '#0f172a',
+    color: '#e2e8f0',
+    display: 'flex',
+    flexDirection: 'column',
+    flexShrink: 0,
+  },
+  logo: {
+    padding: '20px 16px',
+    fontSize: 18,
+    fontWeight: 700,
+    borderBottom: '1px solid #1e293b',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+  },
+  nav: { display: 'flex', flexDirection: 'column', gap: 2, padding: '12px 8px' },
+  link: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    padding: '10px 12px',
+    borderRadius: 8,
+    color: '#cbd5e1',
+    textDecoration: 'none',
+    fontSize: 14,
+    fontWeight: 500,
+    transition: 'all 0.15s',
+  },
+};
+
+function Layout() {
+  const { connected } = useContext(WebSocketContext);
+
+  return (
+    <div style={{ display: 'flex', minHeight: '100vh', background: '#f1f5f9' }}>
+      <aside style={navStyle.sidebar}>
+        <div style={navStyle.logo}>
+          <Shield size={24} /> AgentShield
+        </div>
+        <nav style={navStyle.nav}>
+          {navItems.map(({ to, icon: Icon, label }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={to === '/'}
+              style={({ isActive }) => ({
+                ...navStyle.link,
+                background: isActive ? '#1e293b' : 'transparent',
+                color: isActive ? '#f8fafc' : '#cbd5e1',
+              })}
+            >
+              <Icon size={18} /> {label}
+            </NavLink>
+          ))}
+        </nav>
+        <div style={{ marginTop: 'auto', padding: 16, fontSize: 12, color: '#64748b' }}>
+          {connected ? (
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Wifi size={14} color="#16a34a" /> 实时连接
+            </span>
+          ) : (
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <WifiOff size={14} color="#ef4444" /> 连接断开
+            </span>
+          )}
+        </div>
+      </aside>
+      <main style={{ flex: 1, padding: 24, overflow: 'auto' }}>
+        <Outlet />
+      </main>
+    </div>
+  );
+}
+
+export function App() {
+  return (
+    <Routes>
+      <Route element={<Layout />}>
+        <Route path="/" element={<DashboardPage />} />
+        <Route path="/agents" element={<AgentsPage />} />
+        <Route path="/agents/:id" element={<AgentDetailPage />} />
+        <Route path="/audit-log" element={<AuditLogPage />} />
+        <Route path="/alerts" element={<AlertsPage />} />
+        <Route path="/policies" element={<PoliciesPage />} />
+        <Route path="/family-groups" element={<FamilyGroupsPage />} />
+      </Route>
+    </Routes>
+  );
+}

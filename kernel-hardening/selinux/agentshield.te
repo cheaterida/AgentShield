@@ -1,0 +1,4 @@
+policy_module(agentshield, 1.0.0)
+
+# 占位：为 agent-runtime / ebpf 加载器补充 domain、file 类型与 allow 规则后，
+# 使用 `checkmodule` / `semodule_package` 打包为 `.pp`。

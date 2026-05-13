@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package agentshield.v1;
+
+option go_package = "agentshield.dev/agentshield/shared/gen/go/agentshieldv1";
+
+// 服务端下发的动态策略片段（具体编码可与 OPA bundle / WASM 并存）。
+message PolicyBundle {
+  string version = 1;
+  bytes payload = 2;
+  string digest = 3;
+}
