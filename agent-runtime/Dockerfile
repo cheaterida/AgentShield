@@ -24,13 +24,17 @@ COPY ebpf-probes/agentshield-loader/Cargo.toml ./ebpf-probes/agentshield-loader/
 COPY ebpf-probes/agentshield-loader/src/ ./ebpf-probes/agentshield-loader/src/
 RUN cargo build --release --target x86_64-unknown-linux-musl -p agent-runtime
 
-# ── Stage 2: eBPF bytecode builder ──
+# ── Stage 2: eBPF bytecode builder (needs nightly for bpfel-unknown-none target) ──
 FROM rust:1.80-bookworm AS ebpf-builder
-RUN rustup target add bpfel-unknown-none
+RUN rustup toolchain install nightly && \
+    rustup component add rust-src --toolchain nightly && \
+    rustup target add bpfel-unknown-none --toolchain nightly
 # Install cargo-binstall (pre-built binary, no system deps)
 ADD https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh /tmp/install-binstall.sh
 RUN bash /tmp/install-binstall.sh
 RUN cargo binstall bpf-linker --no-confirm
+# Force nightly for eBPF target
+ENV RUSTUP_TOOLCHAIN=nightly
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY ebpf-probes/agentshield-ebpf/Cargo.toml ./ebpf-probes/agentshield-ebpf/
