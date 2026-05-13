@@ -25,6 +25,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build agent-runtime (musl static)
+        run: cargo build --release --target x86_64-unknown-linux-musl -p agent-runtime
+
+      - name: Install Rust nightly (for eBPF)
+        run: |
+          rustup toolchain install nightly --component rust-src
+          rustup target add bpfel-unknown-none --toolchain nightly
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
+
+      - name: Build eBPF bytecode
+        run: cargo +nightly build --release --target bpfel-unknown-none -p agentshield-ebpf
+
+      - name: Prepare Docker context
+        run: |
+          mkdir -p docker-context
+          cp target/x86_64-unknown-linux-musl/release/agent-runtime docker-context/
+          cp target/bpfel-unknown-none/release/agentshield-ebpf docker-context/
+          cp agent-runtime/entrypoint.sh docker-context/
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -35,14 +64,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: agent-runtime/Dockerfile
+          context: docker-context/
+          file: agent-runtime/Dockerfile.simple
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

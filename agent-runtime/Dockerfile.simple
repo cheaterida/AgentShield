@@ -1,0 +1,18 @@
+# ── AgentShield Agent Runtime (simple) ──
+# Does NOT compile anything — expects pre-built binaries in build context.
+# Used by GitHub Actions which compiles on the runner, not inside Docker.
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates libgcc
+
+COPY agent-runtime /usr/local/bin/agent-runtime
+COPY agentshield-ebpf /usr/local/lib/agentshield/ebpf/agentshield-ebpf.o
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+RUN addgroup -S agentshield && adduser -S agentshield -G agentshield && \
+    mkdir -p /etc/agentshield/policy-cache && \
+    chown -R agentshield:agentshield /etc/agentshield /usr/local/lib/agentshield
+
+USER agentshield
+ENTRYPOINT ["/entrypoint.sh"]
