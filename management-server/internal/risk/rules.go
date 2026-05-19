@@ -15,7 +15,7 @@ type SensitivePathRule struct{}
 
 var sensitivePrefixes = []string{
 	"/etc/passwd", "/etc/shadow", "/root/", "/proc/", "/sys/",
-	"/home/cheater/.ssh", "/var/run/docker.sock",
+	"/var/run/docker.sock",
 }
 
 func (r *SensitivePathRule) Evaluate(ev models.AuditEvent) (float64, string) {

@@ -7,6 +7,7 @@ Architecture:
   → Node head: per-node anomaly_score
 """
 
+import dgl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -45,6 +46,7 @@ class GATAnomalyDetector(nn.Module):
             in_ch = hidden_dim * num_heads if i > 0 else hidden_dim
             out_ch = hidden_dim
             heads = num_heads if i < num_layers - 1 else 2
+            concat = (i < num_layers - 1)
 
             conv = GATConvWithEdge(
                 in_dim=in_ch,
@@ -52,12 +54,19 @@ class GATAnomalyDetector(nn.Module):
                 num_heads=heads,
                 edge_dim=edge_dim,
                 dropout=dropout,
-                concat=(i < num_layers - 1),
+                concat=concat,
             )
             self.convs.append(conv)
-            self.norms.append(nn.LayerNorm(out_ch * heads if i < num_layers - 1 else out_ch * 2))
+            # When concat=True, output dim is out_ch*heads; when False, out_ch (averaged)
+            norm_dim = out_ch * heads if concat else out_ch
+            self.norms.append(nn.LayerNorm(norm_dim))
 
-        # global pooling via attention
+        # project final conv output to target embedding dimension
+        final_conv_dim = hidden_dim * 2 if num_layers == 1 else hidden_dim
+        # Last layer: if num_layers==1, heads=2 with concat → hidden*2; else no concat → hidden
+        self.out_proj = nn.Linear(hidden_dim, out_dim)
+
+        # global pooling via attention (operates on out_dim)
         self.pool_gate = nn.Sequential(
             nn.Linear(out_dim, out_dim),
             nn.Tanh(),
@@ -106,33 +115,15 @@ class GATAnomalyDetector(nn.Module):
             if i < len(self.convs) - 1:
                 h = F.elu(h)
 
+        # project to target embedding dimension
+        h = self.out_proj(h)  # [N, out_dim]
+
         # node-level anomaly scores
         node_scores = self.node_head(h)
 
-        # global pooling
-        if g.batch_size > 1:
-            # batched graphs — need to pool per graph
-            gate = self.pool_gate(h)  # [N, 1]
-            gate = gate.squeeze(-1)  # [N]
-
-            # scatter softmax per graph using DGL's segment ops
-            import dgl.function as fn
-
-            g.ndata["h"] = h
-            g.ndata["gate"] = gate
-
-            # softmax over nodes within each graph
-            g.ndata["gate_exp"] = torch.exp(g.ndata["gate"] - g.ndata["gate"].max())
-            g.update_all(fn.copy_u("gate_exp", "m"), fn.sum("m", "gate_sum"))
-            g.ndata["alpha"] = g.ndata["gate_exp"] / g.ndata["gate_sum"]
-
-            g.ndata["weighted"] = g.ndata["h"] * g.ndata["alpha"].unsqueeze(-1)
-            graph_emb = dgl.readout_nodes(g, "weighted", op="sum", ntype="__ALL__")
-        else:
-            # single graph
-            gate = self.pool_gate(h).squeeze(-1)  # [N]
-            alpha = torch.softmax(gate, dim=0)  # [N]
-            graph_emb = (h * alpha.unsqueeze(-1)).sum(dim=0, keepdim=True)  # [1, out_dim]
+        # global mean pooling (simple, reliable)
+        g.ndata["h"] = h
+        graph_emb = dgl.readout_nodes(g, "h", op="mean")  # [B, out_dim]
 
         graph_score = self.graph_head(graph_emb)  # [B, 1]
 
@@ -180,27 +171,47 @@ class GATConvWithEdge(nn.Module):
         h_src = self.fc_src(node_feats).view(-1, self.num_heads, self.out_dim)
         h_dst = self.fc_dst(node_feats).view(-1, self.num_heads, self.out_dim)
 
-        g.srcdata.update({"h_src": h_src})
-        g.dstdata.update({"h_dst": h_dst})
+        # compute per-node attention scores
+        el = (h_src * self.attn_l).sum(dim=-1, keepdim=True)  # [N, H, 1]
+        er = (h_dst * self.attn_r).sum(dim=-1, keepdim=True)  # [N, H, 1]
 
-        # compute attention scores
-        el = (h_src * self.attn_l).sum(dim=-1, keepdim=True)  # [E, H, 1]
-        er = (h_dst * self.attn_r).sum(dim=-1, keepdim=True)
+        # store per-node scores and let DGL broadcast to edges via apply_edges
+        g.srcdata["el"] = el
+        g.srcdata["h_src"] = h_src
+        g.dstdata["er"] = er
+        g.dstdata["h_dst"] = h_dst
 
-        if edge_feats is not None:
+        has_edge_feats = edge_feats is not None and edge_feats.shape[0] > 0
+        if has_edge_feats:
             e = self.fc_edge(edge_feats).view(-1, self.num_heads, self.out_dim)
-            ee = (e * self.attn_e).sum(dim=-1, keepdim=True)
-            g.edata["a"] = self.leaky_relu(el + er + ee)
-        else:
-            g.edata["a"] = self.leaky_relu(el + er)
+            ee = (e * self.attn_e).sum(dim=-1, keepdim=True)  # [E, H, 1]
+            g.edata["ee"] = ee
 
-        # softmax per dst node
+            def _edge_attn(edges):
+                return {"a": self.leaky_relu(
+                    edges.src["el"] + edges.dst["er"] + edges.data["ee"]
+                )}
+        else:
+            def _edge_attn(edges):
+                return {"a": self.leaky_relu(
+                    edges.src["el"] + edges.dst["er"]
+                )}
+
+        g.apply_edges(_edge_attn)
+
+        # softmax per dst node using apply_edges for correct batching
         g.edata["a_exp"] = torch.exp(g.edata["a"])
         g.update_all(fn.copy_e("a_exp", "m"), fn.sum("m", "a_sum"))
-        g.edata["a_norm"] = g.edata["a_exp"] / g.dstdata["a_sum"]
 
-        # aggregate
-        g.edata["h_weighted"] = g.edata["a_norm"] * g.srcdata["h_src"]
+        def _norm(edges):
+            return {"a_norm": edges.data["a_exp"] / edges.dst["a_sum"]}
+        g.apply_edges(_norm)
+
+        # aggregate weighted messages via apply_edges
+        def _weighted(edges):
+            return {"h_weighted": edges.data["a_norm"] * edges.src["h_src"]}
+        g.apply_edges(_weighted)
+
         g.update_all(fn.copy_e("h_weighted", "m"), fn.sum("m", "h_out"))
 
         h_out = g.dstdata["h_out"]  # [N, H, D]

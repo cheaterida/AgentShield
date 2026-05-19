@@ -62,15 +62,20 @@ func (s *HTTPMLScorer) probe() {
 	s.mu.Lock()
 	s.available = resp.StatusCode == http.StatusOK
 
-	// Parse training event count from health response
+	// Parse ML + GNN status from health response
 	if s.available {
 		var h struct {
-			ModelLoaded string `json:"model_loaded"`
+			ModelLoaded    string `json:"model_loaded"`
+			GNNLoaded      string `json:"gnn_loaded"`
+			TrainingEvents int    `json:"training_events"`
 		}
 		if body, err := io.ReadAll(resp.Body); err == nil {
 			json.Unmarshal(body, &h)
-			if h.ModelLoaded == "True" {
+			if h.ModelLoaded == "True" || h.GNNLoaded == "True" {
 				s.trainCount = 2000 // conservative default
+			}
+			if h.TrainingEvents > 0 {
+				s.trainCount = h.TrainingEvents
 			}
 		}
 	}

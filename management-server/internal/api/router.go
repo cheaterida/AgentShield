@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"agentshield.dev/agentshield/management-server/internal/models"
 	"agentshield.dev/agentshield/management-server/internal/policy"
@@ -13,20 +16,22 @@ import (
 )
 
 type Router struct {
-	log  *slog.Logger
-	store store.Store
-	risk  *risk.Engine
-	hub   *Hub
-	pol   *policy.Distributor
+	log       *slog.Logger
+	store     store.Store
+	risk      *risk.Engine
+	hub       *Hub
+	pol       *policy.Distributor
+	opaClient *policy.OPAClient
 }
 
-func NewRouter(log *slog.Logger, s store.Store, re *risk.Engine, h *Hub, p *policy.Distributor) http.Handler {
-	r := &Router{log: log, store: s, risk: re, hub: h, pol: p}
+func NewRouter(log *slog.Logger, s store.Store, re *risk.Engine, h *Hub, p *policy.Distributor, opa *policy.OPAClient) http.Handler {
+	r := &Router{log: log, store: s, risk: re, hub: h, pol: p, opaClient: opa}
 	m := http.NewServeMux()
 	m.HandleFunc("GET /healthz", r.healthz)
 
 	// Agents
 	m.HandleFunc("POST /api/v1/agents/register", r.registerAgent)
+	m.HandleFunc("POST /api/v1/agents/heartbeat", r.agentHeartbeat)
 	m.HandleFunc("GET /api/v1/agents", r.listAgents)
 	m.HandleFunc("GET /api/v1/agents/{id}", r.getAgent)
 	m.HandleFunc("PUT /api/v1/agents/{id}/status", r.updateAgentStatus)
@@ -34,6 +39,7 @@ func NewRouter(log *slog.Logger, s store.Store, re *risk.Engine, h *Hub, p *poli
 	// Audit
 	m.HandleFunc("POST /api/v1/audit/events", r.appendAuditEvents)
 	m.HandleFunc("GET /api/v1/audit/events", r.listAuditEvents)
+	m.HandleFunc("POST /api/v1/spans", r.ingestSpans)
 
 	// Family Groups
 	m.HandleFunc("GET /api/v1/family-groups", r.listFamilyGroups)
@@ -213,6 +219,36 @@ func (r *Router) updateAgentStatus(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusOK, a)
 }
 
+func (r *Router) agentHeartbeat(w http.ResponseWriter, req *http.Request) {
+	var hb models.AgentHeartbeat
+	if err := json.NewDecoder(req.Body).Decode(&hb); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := r.store.UpdateAgentHeartbeat(req.Context(), hb.AgentID); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	resp := models.HeartbeatResponse{
+		Acknowledged:        true,
+		LatestPolicyVersion: r.pol.GetCurrentVersion(req.Context()),
+		SuggestedAction:     r.computeSuggestedAction(hb.AgentID),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (r *Router) computeSuggestedAction(agentID string) string {
+	score := r.risk.GetAgentScore(agentID)
+	if score >= 0.8 {
+		return "isolate"
+	}
+	if score >= 0.6 {
+		return "restart_probe"
+	}
+	return "ok"
+}
+
 // ── Audit ──
 
 func (r *Router) appendAuditEvents(w http.ResponseWriter, req *http.Request) {
@@ -226,6 +262,10 @@ func (r *Router) appendAuditEvents(w http.ResponseWriter, req *http.Request) {
 
 	// 风险评估
 	alerts := r.risk.Evaluate(req.Context(), payload.Events)
+
+	// OPA 策略评估
+	opaAlerts := r.evaluateOPA(req.Context(), payload.Events)
+	alerts = append(alerts, opaAlerts...)
 
 	n, err := r.store.AppendAuditEvents(req.Context(), payload.Events)
 	if err != nil {
@@ -294,6 +334,109 @@ func (r *Router) listAuditEvents(w http.ResponseWriter, req *http.Request) {
 		events = []models.AuditEvent{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": events, "total": total})
+}
+
+// ── Spans (from agentshield_tracer.py) ──
+
+func (r *Router) ingestSpans(w http.ResponseWriter, req *http.Request) {
+	agentID := req.Header.Get("X-AgentShield-Agent-ID")
+	familyGroupID := req.Header.Get("X-AgentShield-Family-Group-ID")
+	if agentID == "" {
+		agentID = "unknown"
+	}
+	if familyGroupID == "" {
+		familyGroupID = "default"
+	}
+
+	var payload struct {
+		Spans []SpanIngest `json:"spans"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
+	var events []models.AuditEvent
+	for _, sp := range payload.Spans {
+		events = append(events, sp.toAuditEvent(agentID, familyGroupID))
+	}
+
+	if len(events) > 0 {
+		alerts := r.risk.Evaluate(req.Context(), events)
+		n, err := r.store.AppendAuditEvents(req.Context(), events)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		for _, alert := range alerts {
+			if err := r.store.CreateRiskAlert(req.Context(), alert); err != nil {
+				r.log.Error("create alert", "err", err)
+			}
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"accepted": n, "alerts_triggered": len(alerts)})
+	} else {
+		writeJSON(w, http.StatusAccepted, map[string]any{"accepted": 0})
+	}
+}
+
+type SpanIngest struct {
+	TraceID  string            `json:"trace_id"`
+	SpanID   string            `json:"span_id"`
+	Name     string            `json:"name"`
+	Kind     int               `json:"kind"`
+	Start    string            `json:"start_time"`
+	End      string            `json:"end_time"`
+	Duration int64             `json:"duration"`
+	Attrs    map[string]string `json:"attributes"`
+}
+
+var spanTimeFormats = []string{
+	"2006-01-02 15:04:05.000",
+	"2006-01-02 15:04:05.000Z07:00",
+	"2006-01-02T15:04:05Z07:00",
+	time.RFC3339Nano,
+	time.RFC3339,
+}
+
+func (s SpanIngest) toAuditEvent(agentID, familyGroupID string) models.AuditEvent {
+	action := "llm.call"
+	if s.Attrs != nil {
+		if op, ok := s.Attrs["gen_ai.operation.name"]; ok {
+			action = "llm." + op
+		}
+	}
+	resource := s.Name
+	if s.Attrs != nil {
+		if model, ok := s.Attrs["gen_ai.request.model"]; ok {
+			resource = model
+		}
+	}
+	var ts time.Time
+	for _, f := range spanTimeFormats {
+		if t, err := time.Parse(f, s.Start); err == nil {
+			ts = t
+			break
+		}
+	}
+	attrs := map[string]string{
+		"span_id":  s.SpanID,
+		"trace_id": s.TraceID,
+		"duration": fmt.Sprintf("%d", s.Duration),
+	}
+	if s.Attrs != nil {
+		for k, v := range s.Attrs {
+			attrs[k] = v
+		}
+	}
+	return models.AuditEvent{
+		EventID:       s.SpanID,
+		OccurredAt:    ts,
+		FamilyGroupID: familyGroupID,
+		AgentID:       agentID,
+		ResourceRef:   resource,
+		Action:        action,
+		Attributes:    attrs,
+	}
 }
 
 // ── Policies ──
@@ -394,6 +537,103 @@ func (r *Router) dashboardStats(w http.ResponseWriter, req *http.Request) {
 }
 
 // ── helpers ──
+
+// evaluateOPA 对每个审计事件调用 OPA 策略评估。
+// 返回因策略违规触发的告警列表。
+func (r *Router) evaluateOPA(ctx context.Context, events []models.AuditEvent) []models.RiskAlert {
+	if r.opaClient == nil {
+		return nil
+	}
+
+	var policyAlerts []models.RiskAlert
+
+	for i := range events {
+		ev := &events[i]
+
+		// 构建 OPA 输入
+		destination := ""
+		if ev.Attributes != nil {
+			if d, ok := ev.Attributes["network_dst"]; ok {
+				destination = d
+			}
+		}
+		opaInput := map[string]any{
+			"subject":       map[string]string{"family_group_id": ev.FamilyGroupID},
+			"action":        ev.Action,
+			"resource_ref":  ev.ResourceRef,
+			"destination":   destination,
+			"risk_score":    ev.RiskContribution,
+		}
+
+		result, err := r.opaClient.Evaluate(ctx, "agentshield/audit", opaInput)
+		if err != nil {
+			r.log.Debug("opa evaluate error", "event_id", ev.EventID, "err", err)
+			continue
+		}
+
+		// 将 OPA 决策写入事件属性
+		if ev.Attributes == nil {
+			ev.Attributes = make(map[string]string)
+		}
+		allowed, _ := result["allow"].(bool)
+		denyPath, _ := result["deny_sensitive_path"].(bool)
+		denyNet, _ := result["deny_network"].(bool)
+		riskyWrite, _ := result["risky_write"].(bool)
+		riskLevel, _ := result["risk_level"].(string)
+		matchedPath, _ := result["matched_path"].(string)
+
+		if allowed {
+			ev.Attributes["opa_allow"] = "true"
+		} else {
+			ev.Attributes["opa_allow"] = "false"
+		}
+		if denyPath {
+			ev.Attributes["opa_deny_sensitive_path"] = "true"
+			ev.Attributes["opa_matched_path"] = matchedPath
+		}
+		if denyNet {
+			ev.Attributes["opa_deny_network"] = "true"
+		}
+		if riskyWrite {
+			ev.Attributes["opa_risky_write"] = "true"
+		}
+		if riskLevel != "" {
+			ev.Attributes["opa_risk_level"] = riskLevel
+		}
+
+		// 如果策略拒绝或触发高风险规则，生成告警
+		if denyPath || denyNet || !allowed {
+			severity := "high"
+			if riskLevel == "critical" {
+				severity = "critical"
+			}
+			title := "OPA policy violation"
+			desc := ""
+			if denyPath {
+				title = "Sensitive path access blocked"
+				desc = "Agent " + ev.AgentID + " attempted to access " + matchedPath
+			} else if denyNet {
+				title = "Restricted network access blocked"
+				desc = "Agent " + ev.AgentID + " attempted network connection to " + destination
+			} else if !allowed {
+				title = "Unauthorized action blocked"
+				desc = "Agent " + ev.AgentID + " attempted disallowed action: " + ev.Action
+			}
+
+			policyAlerts = append(policyAlerts, models.RiskAlert{
+				AlertID:       "opa_" + ev.EventID,
+				FamilyGroupID: ev.FamilyGroupID,
+				AgentID:       ev.AgentID,
+				Severity:      severity,
+				Title:         title,
+				Description:   desc,
+				Status:        "open",
+				OccurredAt:    ev.OccurredAt,
+			})
+		}
+	}
+	return policyAlerts
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

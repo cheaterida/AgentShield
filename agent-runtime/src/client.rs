@@ -2,6 +2,7 @@
 
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
+use std::net::ToSocketAddrs;
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -11,6 +12,16 @@ pub struct ManagementClient {
     pub agent_id: String,
     family_group_id: String,
     display_name: String,
+}
+
+pub(crate) fn host_port_from_url(url: &str) -> (&str, u16) {
+    let s = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    match s.split_once(':') {
+        Some((host, port)) => (host, port.parse().unwrap_or(80)),
+        None => (s, 80),
+    }
 }
 
 #[derive(Serialize)]
@@ -61,8 +72,44 @@ pub struct AuditEventPayload {
 
 impl ManagementClient {
     pub fn new(base_url: &str, agent_id: &str, family_group_id: &str, display_name: &str) -> Self {
+        let base = base_url.trim_end_matches('/').to_string();
+
+        // ── 调试：DNS 预检 ──
+        let (host, port) = host_port_from_url(&base);
+        tracing::info!(
+            mgmt_host = %host,
+            mgmt_port = port,
+            mgmt_url = %base,
+            agent_id = %agent_id,
+            "ManagementClient init — performing DNS pre-check"
+        );
+        match format!("{}:{}", host, port).to_socket_addrs() {
+            Ok(addrs) => {
+                let addr_list: Vec<_> = addrs.collect();
+                if addr_list.is_empty() {
+                    tracing::error!(
+                        host = %host, port = port,
+                        "DNS resolved but returned ZERO addresses — network unreachable"
+                    );
+                } else {
+                    tracing::info!(
+                        host = %host, port = port,
+                        resolved = ?addr_list,
+                        "DNS resolution OK — {} address(es)", addr_list.len()
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    host = %host, port = port,
+                    error = %e,
+                    "DNS resolution FAILED — check network or /etc/resolv.conf"
+                );
+            }
+        }
+
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: base,
             http: HttpClient::builder()
                 .timeout(Duration::from_secs(15))
                 .build()
@@ -80,17 +127,54 @@ impl ManagementClient {
             display_name: self.display_name.clone(),
         };
         let url = format!("{}/api/v1/agents/register", self.base_url);
-        let resp = self
-            .http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("register request: {}", e))?;
-        if !resp.status().is_success() {
+
+        tracing::info!(url = %url, agent_id = %self.agent_id, "attempting register POST");
+
+        let resp = match self.http.post(&url).json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                // ── 调试：区分网络错误类型 ──
+                let detail = format!("{:?}", e);
+                let hint = if e.is_timeout() {
+                    "TIMEOUT — TCP SYN 可能被防火墙丢弃，或目标不可达"
+                } else if e.is_connect() {
+                    "CONNECT FAILED — TCP 连接被拒绝或端口未监听"
+                } else if e.is_request() {
+                    "REQUEST FAILED — 请求已发出但未收到响应"
+                } else if detail.contains("dns") || detail.contains("resolve") {
+                    "DNS FAILED — 域名解析失败，检查 /etc/resolv.conf"
+                } else {
+                    "UNKNOWN — 见上方错误详情"
+                };
+                tracing::error!(
+                    url = %url,
+                    error = %e,
+                    error_debug = %detail,
+                    hint = hint,
+                    "register POST failed"
+                );
+                return Err(format!("register request: {} ({})", e, hint));
+            }
+        };
+
+        let status = resp.status();
+        tracing::info!(
+            url = %url,
+            status = %status,
+            status_code = status.as_u16(),
+            "register response received"
+        );
+
+        if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(format!("register failed: {}", text));
+            tracing::error!(
+                status = %status,
+                body = %text,
+                "register returned non-success"
+            );
+            return Err(format!("register failed: {} — {}", status, text));
         }
+
         tracing::info!(agent_id = %self.agent_id, "registered with management-server");
         Ok(())
     }
@@ -103,6 +187,8 @@ impl ManagementClient {
         policy_version: &str,
         buffered: i32,
     ) -> Result<HeartbeatResp, String> {
+        let url = format!("{}/api/v1/agents/heartbeat", self.base_url);
+
         let body = HeartbeatReq {
             agent_id: self.agent_id.clone(),
             cpu_percent: cpu,
@@ -112,34 +198,50 @@ impl ManagementClient {
             buffered_event_count: buffered,
         };
 
-        // POST to audit/events as heartbeat workaround — or dedicated endpoint.
-        // Using agent status update for heartbeat tracking.
-        let url = format!(
-            "{}/api/v1/agents/{}/status",
-            self.base_url, self.agent_id
-        );
         let resp = self
             .http
-            .put(&url)
-            .json(&serde_json::json!({"status": "online"}))
+            .post(&url)
+            .json(&body)
             .send()
             .await
-            .map_err(|e| format!("heartbeat request: {}", e))?;
+            .map_err(|e| {
+                tracing::error!(
+                    url = %url,
+                    error = %e,
+                    "heartbeat request failed"
+                );
+                format!("heartbeat request: {}", e)
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                url = %url,
+                status = %status,
+                body = %text,
+                "heartbeat returned non-success"
+            );
+            return Ok(HeartbeatResp {
+                acknowledged: false,
+                latest_policy_version: String::new(),
+                suggested_action: "ok".into(),
+            });
+        }
+
+        let parsed: HeartbeatResp = resp
+            .json()
+            .await
+            .map_err(|e| format!("heartbeat parse response: {}", e))?;
 
         tracing::debug!(
-            agent_id = %self.agent_id,
-            cpu = cpu,
-            mem_mb = mem / 1024 / 1024,
-            probes = active_probes,
-            "heartbeat sent"
+            ack = parsed.acknowledged,
+            action = %parsed.suggested_action,
+            policy_ver = %parsed.latest_policy_version,
+            "heartbeat response"
         );
-        let _ = resp;
 
-        Ok(HeartbeatResp {
-            acknowledged: true,
-            latest_policy_version: String::new(),
-            suggested_action: "ok".into(),
-        })
+        Ok(parsed)
     }
 
     pub async fn upload_events(

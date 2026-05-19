@@ -30,3 +30,25 @@ Thumbs.db
 # Env
 .env
 .env.local
+*.env
+env.vm
+
+# Claude local config
+.claude/
+
+# ML models (large binaries)
+ml-pipeline/models/*.pt
+ml-pipeline/models/*.bundle.json
+
+# Build artifacts
+agent-runtime/agent-runtime
+agent-runtime/agentshield-ebpf.o
+agent-runtime/bin/
+agent-runtime/.build-context/
+agent-runtime/build-log.txt
+
+# Dataset files (large, external)
+ml-pipeline/data/
+
+# Egg info
+ml-pipeline/src/agentshield_ml.egg-info/

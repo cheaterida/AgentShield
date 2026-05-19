@@ -89,7 +89,63 @@ func (e *Engine) Evaluate(ctx context.Context, events []models.AuditEvent) []mod
 			alerts = append(alerts, *alert)
 		}
 	}
+
+	// GNN/CFG scoring: group events by agent and call ScoreCFG for graph-level anomaly detection
+	e.scoreCFGForAgents(ctx, events, mlWeight)
+
 	return alerts
+}
+
+// scoreCFGForAgents groups events by agent and calls the GNN-based CFG scorer
+// for agents with enough events to build a meaningful graph.
+func (e *Engine) scoreCFGForAgents(ctx context.Context, events []models.AuditEvent, mlWeight float64) {
+	if e.mlScorer == nil || !e.mlScorer.IsAvailable() || mlWeight <= 0.05 {
+		return
+	}
+
+	// Group events by agent
+	type agentData struct {
+		actions      []string
+		resourceRefs []string
+	}
+	byAgent := make(map[string]*agentData)
+	for i := range events {
+		ev := &events[i]
+		ad, ok := byAgent[ev.AgentID]
+		if !ok {
+			ad = &agentData{}
+			byAgent[ev.AgentID] = ad
+		}
+		ad.actions = append(ad.actions, ev.Action)
+		ad.resourceRefs = append(ad.resourceRefs, ev.ResourceRef)
+	}
+
+	// Score CFG for each agent with ≥2 events
+	for agentID, ad := range byAgent {
+		if len(ad.actions) < 2 {
+			continue
+		}
+		graphJSON := buildCFGJSON(agentID, ad.actions, ad.resourceRefs)
+		cfgScore, err := e.mlScorer.ScoreCFG(ctx, agentID, graphJSON)
+		if err != nil {
+			e.log.Debug("cfg scoring failed", "agent_id", agentID, "err", err)
+			continue
+		}
+
+		// Blend CFG score into agent's EMA (CFG weight is 0.3 of mlWeight)
+		cfgWeight := mlWeight * 0.3
+		currentEMA := e.agentScores[agentID]
+		blendedScore := cfgWeight*cfgScore + (1-cfgWeight)*currentEMA
+		e.agentScores[agentID] = blendedScore
+
+		if cfgScore > 0.5 {
+			e.log.Debug("cfg anomaly detected",
+				"agent_id", agentID,
+				"cfg_score", cfgScore,
+				"ema_after", blendedScore,
+			)
+		}
+	}
 }
 
 // computeMLWeight 根据训练数据量计算 ML 评分的权重。
@@ -125,10 +181,6 @@ func (e *Engine) scoreEventRules(ev *models.AuditEvent) float64 {
 	return score
 }
 
-// scoreEvent is the legacy scoring path (no ML). Kept for backward compat.
-func (e *Engine) scoreEvent(ev *models.AuditEvent) float64 {
-	return e.scoreEventRules(ev)
-}
 
 func (e *Engine) checkThresholds(ev *models.AuditEvent, ema float64) *models.RiskAlert {
 	var severity string

@@ -21,9 +21,9 @@ impl EventUploadTask {
     }
 
     pub async fn run(self, interval_secs: u64) {
-        let interval = Duration::from_secs(interval_secs);
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         loop {
-            tokio::time::sleep(interval).await;
+            interval.tick().await;
 
             let events = self.buffer.drain(self.batch_size);
             if events.is_empty() {

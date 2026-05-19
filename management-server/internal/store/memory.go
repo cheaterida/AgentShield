@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -305,6 +306,21 @@ func (m *Memory) GetActivePolicyBundle(_ context.Context) (models.PolicyBundle, 
 		}
 	}
 	return models.PolicyBundle{}, false, nil
+}
+
+func (m *Memory) SetPolicyBundleActive(_ context.Context, version string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.policies {
+		m.policies[i].Active = false
+	}
+	for i := range m.policies {
+		if m.policies[i].Version == version {
+			m.policies[i].Active = true
+			return nil
+		}
+	}
+	return fmt.Errorf("policy version %q not found", version)
 }
 
 func (m *Memory) ListPolicyBundles(_ context.Context) ([]models.PolicyBundle, error) {

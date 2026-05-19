@@ -1,21 +1,21 @@
 //! eBPF probe loader — loads agentshield-ebpf bytecode and attaches to kernel
 //! tracepoints. Reads events via perf buffer and logs them for the agent-runtime.
-//!
-//! Production deployment requires:
-//!   - Linux kernel 5.8+ with BPF enabled
-//!   - CAP_BPF + CAP_PERFMON (or CAP_SYS_ADMIN / privileged)
-//!   - Compiled eBPF bytecode at a known path
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use aya::maps::perf::PerfEventArray;
+use aya::Ebpf;
+use aya::maps::perf::AsyncPerfEventArray;
 use aya::programs::TracePoint;
-use aya::{Bpf, include_bytes_aligned};
+use aya::include_bytes_aligned;
+use aya::util::online_cpus;
+use bytes::BytesMut;
 use tokio::sync::mpsc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use agentshield_ebpf_common::ProbeEvent;
+
+const PERF_BUF_PAGES: usize = 16;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,7 +26,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("AgentShield eBPF loader starting");
 
-    // Try to load embedded bytecode; fall back gracefully
     let mut bpf = match load_bpf() {
         Ok(b) => {
             tracing::info!("eBPF bytecode loaded successfully");
@@ -42,10 +41,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Attach tracepoints
     let tracepoints = [
-        ("syscalls", "sys_enter_openat", "agentshield_syscall_enter_openat"),
-        ("syscalls", "sys_enter_execve", "agentshield_syscall_enter_execve"),
-        ("syscalls", "sys_enter_connect", "agentshield_syscall_enter_connect"),
-        ("syscalls", "sys_enter_bind", "agentshield_syscall_enter_bind"),
+        ("syscalls", "sys_enter_openat", "agentshield_sys_enter_openat"),
+        ("syscalls", "sys_enter_execve", "agentshield_sys_enter_execve"),
+        ("syscalls", "sys_enter_connect", "agentshield_sys_enter_connect"),
+        ("syscalls", "sys_enter_bind", "agentshield_sys_enter_bind"),
     ];
 
     let mut attached = 0;
@@ -68,27 +67,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Read from perf event array
+    // Open perf event array for reading events
+    let perf_map = match bpf.take_map("EVENTS") {
+        Some(m) => m,
+        None => {
+            tracing::warn!("EVENTS map not found, running demo mode");
+            run_demo_mode().await;
+            return Ok(());
+        }
+    };
+
+    let mut perf_array = AsyncPerfEventArray::try_from(perf_map)?;
     let event_count = Arc::new(AtomicU64::new(0));
     let (tx, mut rx) = mpsc::channel::<ProbeEvent>(1024);
 
-    // Spawn perf reader tasks
-    if let Ok(events) = PerfEventArray::<ProbeEvent>::try_from(bpf.map_mut("EVENTS")?) {
+    // Spawn perf reader per CPU
+    for cpu_id in online_cpus().map_err(|(_, e)| e)? {
+        let mut buf = perf_array.open(cpu_id, Some(PERF_BUF_PAGES))?;
         let count = event_count.clone();
-        let tx_clone = tx.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut buf = PerfEventArray::<ProbeEvent>::default();
+        let tx = tx.clone();
+
+        tokio::spawn(async move {
+            let mut bufs = vec![BytesMut::with_capacity(std::mem::size_of::<ProbeEvent>())];
             loop {
-                let events_read = events.read_events(&mut buf)?;
-                for event in buf.iter() {
-                    count.fetch_add(1, Ordering::Relaxed);
-                    let _ = tx_clone.blocking_send(*event);
-                    tracing::debug!(
-                        "eBPF event: pid={} syscall={} file={}",
-                        event.pid,
-                        event.syscall_str(),
-                        event.filename_str(),
-                    );
+                match buf.read_events(&mut bufs).await {
+                    Ok(events) => {
+                        let available = bufs[0].len() / std::mem::size_of::<ProbeEvent>();
+                        for _ in 0..available {
+                            // Perf events from Aya are read into BytesMut
+                        }
+                        count.fetch_add(events.read as u64, Ordering::Relaxed);
+                        // Forward raw bytes — in production, deserialize properly
+                        if !bufs[0].is_empty() {
+                            let bytes = bufs[0].split();
+                            if bytes.len() >= std::mem::size_of::<ProbeEvent>() {
+                                let event: ProbeEvent = unsafe {
+                                    std::ptr::read_unaligned(bytes.as_ptr() as *const ProbeEvent)
+                                };
+                                let _ = tx.send(event).await;
+                            }
+                        }
+                        bufs[0].clear();
+                    }
+                    Err(e) => {
+                        tracing::error!("Perf buffer read error: {}", e);
+                    }
                 }
             }
         });
@@ -104,7 +127,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Keep running, forwarding events
+    // Forward events to agent-runtime (placeholder)
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            tracing::debug!(
+                "eBPF event: pid={} syscall={} file={}",
+                event.pid,
+                event.syscall_str(),
+                event.filename_str(),
+            );
+        }
+    });
+
     tracing::info!("eBPF loader running — press Ctrl+C to stop");
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutting down eBPF loader");
@@ -112,14 +146,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn load_bpf() -> Result<Bpf, Box<dyn std::error::Error>> {
-    // Try embedded bytecode first (requires cargo build with bpf-linker)
+fn load_bpf() -> Result<Ebpf, Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     {
-        let bytes = include_bytes_aligned!("../../agentshield-ebpf/target/bpfel-unknown-none/release/agentshield-ebpf");
+        let bytes = include_bytes_aligned!("../../agentshield-ebpf/target/bpfel-unknown-none/debug/agentshield-ebpf");
         tracing::info!("Loading embedded eBPF bytecode ({} bytes)", bytes.len());
-        let mut bpf = Bpf::load(bytes)?;
-        Ok(bpf)
+        Ok(Ebpf::load(bytes)?)
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -129,12 +161,14 @@ fn load_bpf() -> Result<Bpf, Box<dyn std::error::Error>> {
 }
 
 fn attach_tracepoint(
-    bpf: &mut Bpf,
+    bpf: &mut Ebpf,
     category: &str,
     name: &str,
     prog_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let program: &mut TracePoint = bpf.program_mut(prog_name)?
+    let program: &mut TracePoint = bpf
+        .program_mut(prog_name)
+        .ok_or_else(|| format!("program not found: {}", prog_name))?
         .try_into()?;
     program.load()?;
     program.attach(category, name)?;

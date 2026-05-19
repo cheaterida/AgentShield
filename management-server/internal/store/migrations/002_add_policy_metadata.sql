@@ -1,5 +1,4 @@
--- Add policy_type column (distinguishes opa_rego from gnn_policy)
-ALTER TABLE policy_bundles ADD COLUMN policy_type TEXT NOT NULL DEFAULT 'opa_rego';
-
--- Add metadata_json column for ML model params (svdd_center, r_max, thresholds, etc.)
-ALTER TABLE policy_bundles ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
+-- 002: ensure metadata_json exists on policy_bundles (safe to re-run).
+-- The column is already in 001_init; this migration is kept for
+-- databases created before the schema was consolidated.
+ALTER TABLE policy_bundles ADD COLUMN metadata_json TEXT DEFAULT '{}';

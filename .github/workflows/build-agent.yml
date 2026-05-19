@@ -10,7 +10,51 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/agentshield-agent
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Go test (management-server)
+        run: cd management-server && go test -race -count=1 ./...
+
+      - name: Go test (gateway)
+        run: cd gateway && go test -race -count=1 ./...
+
+      - name: Go test (error-handler)
+        run: cd error-handler && go test -race -count=1 ./...
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust test (agent-runtime non-Linux)
+        run: cargo test -p agent-runtime --target x86_64-unknown-linux-gnu
+
+      - name: Rust test (ebpf-common)
+        run: cargo test -p agentshield-ebpf-common
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ML dependencies
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install dgl -f https://data.dgl.ai/wheels/torch-2.4/cpu/repo.html
+          pip install -e "ml-pipeline/[dev]"
+
+      - name: Python test (ml-pipeline)
+        run: cd ml-pipeline && python -m pytest tests/ -v
+
   build-and-push:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read

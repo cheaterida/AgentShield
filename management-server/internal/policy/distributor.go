@@ -28,35 +28,23 @@ func NewDistributor(st store.Store, log *slog.Logger) *Distributor {
 
 // ActivatePolicy 激活策略包并通知所有观察者。
 func (d *Distributor) ActivatePolicy(ctx context.Context, version string) error {
-	policies, err := d.store.ListPolicyBundles(ctx)
-	if err != nil {
+	if err := d.store.SetPolicyBundleActive(ctx, version); err != nil {
 		return err
 	}
-	var target *models.PolicyBundle
-	for i := range policies {
-		if policies[i].Version == version {
-			target = &policies[i]
-			break
-		}
-	}
-	if target == nil {
+	d.log.Info("policy activated", "version", version)
+
+	// 获取激活后的策略包用于通知观察者
+	pb, ok, err := d.store.GetActivePolicyBundle(ctx)
+	if err != nil || !ok {
 		return nil
 	}
-	// 取消激活所有旧策略
-	for i := range policies {
-		if policies[i].Active {
-			// 这里需要 store 提供 DeactivateAll，简化处理直接标记新的
-		}
-	}
-	target.Active = true
-	d.log.Info("policy activated", "version", version)
 
 	// 通知所有观察者
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	for agentID, ch := range d.watchers {
 		select {
-		case ch <- target:
+		case ch <- &pb:
 		default:
 			d.log.Warn("watcher channel full, dropping", "agent_id", agentID)
 		}

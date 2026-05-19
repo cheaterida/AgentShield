@@ -27,7 +27,7 @@ sensitive_paths := [
 	"/proc/",
 	"/sys/kernel/",
 	"/var/run/docker.sock",
-	"/home/cheater/.ssh",
+
 ]
 
 # ── 网络访问控制 ──
@@ -42,10 +42,15 @@ net_is_restricted(dst) if {
 	startswith(dst, "10.")
 }
 net_is_restricted(dst) if {
-	startswith(dst, "172.16.")
+	startswith(dst, "192.168.")
 }
 net_is_restricted(dst) if {
-	startswith(dst, "192.168.")
+	startswith(dst, "172.")
+	octets := split(dst, ".")
+	count(octets) >= 2
+	second := to_number(octets[1])
+	second >= 16
+	second <= 31
 }
 
 # ── 速率限制辅助 ──

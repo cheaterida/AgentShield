@@ -68,8 +68,12 @@ func main() {
 	wsHub := api.NewHub(logger)
 	polDist := policy.NewDistributor(st, logger)
 
+	// OPA 策略引擎客户端
+	opaClient := policy.NewOPAClient(cfg.OPABaseURL)
+	logger.Info("opa client ready", "base_url", cfg.OPABaseURL)
+
 	// ── HTTP API ──
-	apiHandler := api.NewRouter(logger, st, riskEngine, wsHub, polDist)
+	apiHandler := api.NewRouter(logger, st, riskEngine, wsHub, polDist, opaClient)
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           withLogging(logger, withCORS(apiHandler)),

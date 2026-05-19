@@ -45,6 +45,67 @@
 - **Go 模块**：`gateway`、`management-server`、`error-handler` 各自独立 `go.mod`，模块路径前缀 `agentshield.dev/agentshield/...`（可按实际仓库 URL 替换）。
 - **Python**：在 `ml-pipeline/` 执行 `pip install -e ".[dev]"`。
 
+## 本地开发环境启动
+
+以下命令用于 Windows 宿主机（Docker Desktop + Python 3），从零启动完整项目。
+
+### 1. OPA 策略引擎
+
+```powershell
+docker run -d --name opa -p 8181:8181 -v "C:\Users\Acer\Desktop\AgentShield\security-policy\policies:/policies:ro" openpolicyagent/opa:latest run --server --addr=:8181 /policies
+```
+
+### 2. 数据目录 + 管理服务器
+
+```powershell
+docker volume create management_server_data
+docker run -d --name management-server -p 8080:8080 -p 9090:9090 -v management_server_data:/data --env-file deployments/mgmt.env agentshield/management-server:dev
+```
+
+> `deployments/mgmt.env` 中配置 SQLite 路径 `/data/agentshield.db`，Docker 重启后数据不丢失。
+
+### 3. Web 控制台（8081）
+
+```bash
+cd /c/Users/Acer/Desktop/AgentShield/management-server && python serve-web.py 8081 &
+```
+
+> 代理 `/api/*` → management-server (8080)，提供 SPA 面板和 ClickHouse 链路查询。
+
+### 4. 文件传输服务器（9999，向 VM 推送文件）
+
+```powershell
+docker run -d --name file-server -p 9999:9999 -v "C:\Users\Acer\Desktop\AgentShield\agent-runtime\bin:/files:ro" python:alpine python -m http.server 9999 --directory /files
+```
+
+> **必须用 PowerShell 启动**，MSYS2/bash 会自动转换路径导致 Docker 挂载失败。
+
+### 5. 更新 tracer 并部署到 VM
+
+```bash
+# 复制到 file-server 挂载目录
+cp -f C:/Users/Acer/Desktop/AgentShield/sdk/python/agentshield_tracer.py C:/Users/Acer/Desktop/AgentShield/agent-runtime/bin/agentshield_tracer.py
+
+# VM 上执行
+wget -O /usr/local/lib/agentshield/agentshield_tracer.py http://100.123.70.98:9999/agentshield_tracer.py
+systemctl restart hermes-agent
+```
+
+### 验证
+
+| 端口 | 服务 | 验证命令 |
+|------|------|----------|
+| 8080 | management-server | `curl http://localhost:8080/healthz` |
+| 8081 | Web 控制台 | `curl -o /dev/null -w "%{http_code}" http://localhost:8081/` |
+| 8181 | OPA | `curl -o /dev/null -w "%{http_code}" http://localhost:8181/` |
+| 9999 | file-server | `curl -o /dev/null -w "%{http_code}" http://localhost:9999/agentshield_tracer.py` |
+
+### 一键全部停用
+
+```bash
+docker rm -f management-server opa file-server 2>/dev/null; pkill -f "serve-web.py"
+```
+
 ## 推荐数据流（与实现对齐）
 
 1. **请求链**：用户/Webhook → `gateway` → `agent-runtime`（容器内 Agent）。

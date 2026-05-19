@@ -14,9 +14,9 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # 用户态加载器与工具链；与 `aya-ebpf`（eBPF 侧，通常为 0.1.x）版本由上游矩阵锁定，遇编译错误请按 `cargo tree` 对齐。
-aya = "0.13"
+aya = { version = "0.13", features = ["async_tokio"] }
 aya-ebpf = "0.1"
-tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"

@@ -23,6 +23,10 @@ type SQLiteStore struct {
 }
 
 func NewSQLite(dsn string) (*SQLiteStore, error) {
+	// modernc.org/sqlite requires file: URI format with mode=rwc for absolute paths
+	if dsn != ":memory:" && !strings.HasPrefix(dsn, "file:") {
+		dsn = "file:" + dsn + "?mode=rwc"
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite open: %w", err)
@@ -84,14 +88,10 @@ func (s *SQLiteStore) CreateFamilyGroup(_ context.Context, fg models.FamilyGroup
 	}
 	members, _ := json.Marshal(fg.MemberPrincipalIDs)
 	_, err := s.db.Exec(
-		`INSERT INTO family_groups (id, display_name, labels, created_at, updated_at) VALUES (?,?,?,?,?)`,
-		fg.ID, fg.DisplayName, marshalMap(fg.Labels), time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano),
+		`INSERT INTO family_groups (id, display_name, member_principal_ids, labels, created_at, updated_at) VALUES (?,?,?,?,?,?)`,
+		fg.ID, fg.DisplayName, string(members), marshalMap(fg.Labels), time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano),
 	)
-	if err != nil {
-		_ = members
-		return err
-	}
-	return nil
+	return err
 }
 
 func (s *SQLiteStore) GetFamilyGroup(_ context.Context, id string) (models.FamilyGroup, bool, error) {
@@ -99,8 +99,8 @@ func (s *SQLiteStore) GetFamilyGroup(_ context.Context, id string) (models.Famil
 	var labels []byte
 	var members []byte
 	var ca, ua string
-	err := s.db.QueryRow(`SELECT id, display_name, labels, created_at, updated_at FROM family_groups WHERE id=?`, id).
-		Scan(&fg.ID, &fg.DisplayName, &labels, &ca, &ua)
+	err := s.db.QueryRow(`SELECT id, display_name, COALESCE(member_principal_ids,'[]'), labels, created_at, updated_at FROM family_groups WHERE id=?`, id).
+		Scan(&fg.ID, &fg.DisplayName, &members, &labels, &ca, &ua)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fg, false, nil
 	}
@@ -115,7 +115,7 @@ func (s *SQLiteStore) GetFamilyGroup(_ context.Context, id string) (models.Famil
 }
 
 func (s *SQLiteStore) ListFamilyGroups(_ context.Context) ([]models.FamilyGroup, error) {
-	rows, err := s.db.Query(`SELECT id, display_name, labels, created_at, updated_at FROM family_groups ORDER BY created_at DESC`)
+	rows, err := s.db.Query(`SELECT id, display_name, COALESCE(member_principal_ids,'[]'), labels, created_at, updated_at FROM family_groups ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -123,12 +123,13 @@ func (s *SQLiteStore) ListFamilyGroups(_ context.Context) ([]models.FamilyGroup,
 	var out []models.FamilyGroup
 	for rows.Next() {
 		var fg models.FamilyGroup
-		var labels []byte
+		var labels, members []byte
 		var ca, ua string
-		if err := rows.Scan(&fg.ID, &fg.DisplayName, &labels, &ca, &ua); err != nil {
+		if err := rows.Scan(&fg.ID, &fg.DisplayName, &members, &labels, &ca, &ua); err != nil {
 			return out, err
 		}
 		fg.Labels = jsonMap(labels)
+		_ = json.Unmarshal(members, &fg.MemberPrincipalIDs)
 		fg.CreatedAt, _ = time.Parse(time.RFC3339Nano, ca)
 		fg.UpdatedAt, _ = time.Parse(time.RFC3339Nano, ua)
 		out = append(out, fg)
@@ -137,9 +138,10 @@ func (s *SQLiteStore) ListFamilyGroups(_ context.Context) ([]models.FamilyGroup,
 }
 
 func (s *SQLiteStore) UpdateFamilyGroup(_ context.Context, fg models.FamilyGroup) error {
+	members, _ := json.Marshal(fg.MemberPrincipalIDs)
 	results, err := s.db.Exec(
-		`UPDATE family_groups SET display_name=?, labels=?, updated_at=? WHERE id=?`,
-		fg.DisplayName, marshalMap(fg.Labels), time.Now().UTC().Format(time.RFC3339Nano), fg.ID,
+		`UPDATE family_groups SET display_name=?, member_principal_ids=?, labels=?, updated_at=? WHERE id=?`,
+		fg.DisplayName, string(members), marshalMap(fg.Labels), time.Now().UTC().Format(time.RFC3339Nano), fg.ID,
 	)
 	if err != nil {
 		return err
@@ -404,6 +406,22 @@ func (s *SQLiteStore) GetActivePolicyBundle(_ context.Context) (models.PolicyBun
 	return pb, true, nil
 }
 
+func (s *SQLiteStore) SetPolicyBundleActive(_ context.Context, version string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`UPDATE policy_bundles SET active = 0`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE policy_bundles SET active = 1 WHERE version = ?`, version); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *SQLiteStore) ListPolicyBundles(_ context.Context) ([]models.PolicyBundle, error) {
 	rows, err := s.db.Query(`SELECT version, policy_type, payload, digest, active, COALESCE(metadata_json,'{}'), created_at FROM policy_bundles ORDER BY created_at DESC`)
 	if err != nil {
@@ -430,9 +448,10 @@ func (s *SQLiteStore) ListPolicyBundles(_ context.Context) ([]models.PolicyBundl
 
 func (s *SQLiteStore) CreateRiskAlert(_ context.Context, alert models.RiskAlert) error {
 	meta, _ := json.Marshal(alert.Metadata)
+	now := time.Now()
 	_, err := s.db.Exec(
-		`INSERT INTO risk_alerts (alert_id, family_group_id, agent_id, severity, title, description, status, metadata_json, occurred_at) VALUES (?,?,?,?,?,?,?,?,?)`,
-		alert.AlertID, alert.FamilyGroupID, alert.AgentID, alert.Severity, alert.Title, alert.Description, alert.Status, string(meta), alert.OccurredAt.Format(time.RFC3339Nano),
+		`INSERT INTO risk_alerts (alert_id, family_group_id, agent_id, severity, title, description, status, metadata_json, occurred_at, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		alert.AlertID, alert.FamilyGroupID, alert.AgentID, alert.Severity, alert.Title, alert.Description, alert.Status, string(meta), alert.OccurredAt.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 	)
 	return err
 }

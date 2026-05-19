@@ -145,6 +145,32 @@ services:
     depends_on:
       - management-server
 
+  # ── Span → Audit Event Bridge ──
+  # Polls AgentShield ClickHouse (agentshield.spans) for new spans,
+  # converts to audit events, pushes to management-server.
+  bridge:
+    build:
+      context: ../bridge
+      dockerfile: Dockerfile
+    image: agentshield/bridge:dev
+    profiles: ["full", "core", "prod"]
+    environment:
+      # ClickHouse (AgentShield's own, not Langtrace)
+      CLICKHOUSE_HOST: "${CLICKHOUSE_HOST:-host.docker.internal}"
+      CLICKHOUSE_PORT: "${CLICKHOUSE_PORT:-8123}"
+      CLICKHOUSE_USER: "${CLICKHOUSE_USER}"
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD}"
+      # AgentShield identity
+      AGENTSHIELD_AGENT_ID: "${AGENTSHIELD_AGENT_ID:-bridge-agent}"
+      AGENTSHIELD_FAMILY_GROUP_ID: "${AGENTSHIELD_FAMILY_GROUP_ID:-default}"
+      # Management server (same compose network)
+      MANAGEMENT_SERVER_URL: "http://management-server:8080"
+      # Polling
+      POLL_INTERVAL_SECS: "${POLL_INTERVAL_SECS:-30}"
+      BATCH_SIZE: "${BATCH_SIZE:-100}"
+    depends_on:
+      - management-server
+
 volumes:
   agentshield_data:
   neo4j_data:

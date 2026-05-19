@@ -33,6 +33,7 @@ type Store interface {
 	CreatePolicyBundle(ctx context.Context, pb models.PolicyBundle) error
 	GetActivePolicyBundle(ctx context.Context) (models.PolicyBundle, bool, error)
 	ListPolicyBundles(ctx context.Context) ([]models.PolicyBundle, error)
+	SetPolicyBundleActive(ctx context.Context, version string) error
 
 	// Risk alerts
 	CreateRiskAlert(ctx context.Context, alert models.RiskAlert) error

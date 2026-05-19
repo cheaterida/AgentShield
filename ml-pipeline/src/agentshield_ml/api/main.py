@@ -81,6 +81,7 @@ _trainer: Optional[CAETrainer] = None
 _extractor: Optional[FeatureExtractor] = None
 _device: str = "cuda" if torch.cuda.is_available() else "cpu"
 _model_path: Path = Path(os.environ.get("AGENTSHIELD_ML_MODEL_PATH", "./models/cae_checkpoint.pt"))
+_gnn_model_path: Path = Path(os.environ.get("AGENTSHIELD_GNN_MODEL_PATH", "./models/gnn_svdd.pt"))
 
 
 def _get_extractor() -> FeatureExtractor:
@@ -116,6 +117,32 @@ def _get_model() -> ContrastiveAutoencoder:
     return _model
 
 
+def _load_gnn_model() -> None:
+    """Load the trained GNN SVDD checkpoint at startup if available."""
+    if not _gnn_model_path.exists():
+        app.state.gnn_available = False
+        return
+
+    try:
+        from ..gnn.model import GATAnomalyDetector
+        from ..gnn.svdd_trainer import SVDDTrainer
+        from ..gnn.inference import GNNInference
+
+        gnn = GATAnomalyDetector(
+            in_dim=154, hidden_dim=128, out_dim=150,
+            num_heads=4, num_layers=3, edge_dim=4, dropout=0.1,
+        )
+        trainer = SVDDTrainer.load(str(_gnn_model_path), gnn, _device)
+        app.state.gnn_inference = GNNInference(
+            model=gnn, trainer=trainer, device=_device,
+        )
+        app.state.gnn_available = True
+        app.state.gnn_training_events = trainer._train_step
+        app.state.gnn_r_max = trainer.r_max
+    except Exception:
+        app.state.gnn_available = False
+
+
 def _event_to_dict(ev: AuditEventScoreReq) -> dict:
     return {
         "event_id": ev.event_id,
@@ -127,6 +154,13 @@ def _event_to_dict(ev: AuditEventScoreReq) -> dict:
     }
 
 
+# ── startup ──
+
+@app.on_event("startup")
+def _startup() -> None:
+    _load_gnn_model()
+
+
 # ── endpoints ──
 
 @app.get("/healthz")
@@ -136,6 +170,8 @@ def healthz() -> dict[str, str]:
         "version": "0.2.0",
         "device": _device,
         "model_loaded": str(getattr(app.state, "model_loaded", False)),
+        "gnn_loaded": str(getattr(app.state, "gnn_available", False)),
+        "training_events": str(getattr(app.state, "gnn_training_events", 0)),
     }
 
 
@@ -293,6 +329,125 @@ def cfg_analyze(req: CFGAnalyzeReq) -> CFGAnalyzeResp:
         anomaly_detected=anomaly,
         anomaly_score=score,
         details=details,
+    )
+
+
+# ── GNN training models ──
+
+class GNNTrainRequest(BaseModel):
+    events: list[AuditEventScoreReq]
+    epochs: int = 50
+    lr: float = 1e-3
+    svdd_nu: float = 0.1
+    window_size: int = 200
+    family_group_id: str = "default"
+
+
+class GNNTrainResponse(BaseModel):
+    status: str
+    num_graphs: int
+    num_normal: int
+    final_loss: float
+    r_max: float
+    center_norm: float
+    checkpoint_path: str
+
+
+@app.post("/api/v1/gnn/train", response_model=GNNTrainResponse)
+def train_gnn(req: GNNTrainRequest) -> GNNTrainResponse:
+    """Train the GNN anomaly detector (SVDD) on the provided events.
+
+    Events are grouped by agent_id, CFG graphs are built, and Deep SVDD
+    is trained on normal-operation graphs.
+    """
+    from ..cfg.batch_builder import build_graphs_from_events
+    from ..gnn.dataloader import CFGGraphDataset, collate_graph_batch
+    from ..gnn.model import GATAnomalyDetector
+    from ..gnn.svdd_trainer import SVDDTrainer
+
+    if not req.events:
+        raise HTTPException(status_code=400, detail="no events provided")
+
+    # Group events by agent_id
+    agent_events: dict[str, list[dict]] = {}
+    for ev in req.events:
+        event_dict = _event_to_dict(ev)
+        agent_events.setdefault(ev.agent_id, []).append(event_dict)
+
+    # Build CFG graphs (with CAE embeddings if model is loaded)
+    model = _get_model()
+    extractor = _get_extractor()
+    model_loaded = getattr(app.state, "model_loaded", False)
+
+    graphs = build_graphs_from_events(
+        agent_events,
+        model=model if model_loaded else None,
+        extractor=extractor if model_loaded else None,
+        device=_device,
+        window_size=req.window_size,
+    )
+
+    normal_graphs = [g for g in graphs if g.get("label") == "normal"]
+    if len(normal_graphs) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail=f"need at least 3 normal graphs, got {len(normal_graphs)}",
+        )
+
+    # Create dataset and dataloader
+    dataset = CFGGraphDataset(normal_graphs)
+    from torch.utils.data import DataLoader
+    dataloader = DataLoader(
+        dataset,
+        batch_size=min(32, len(dataset)),
+        shuffle=True,
+        collate_fn=collate_graph_batch,
+    )
+
+    # Initialize GNN model and SVDD trainer
+    gnn_model = GATAnomalyDetector(
+        in_dim=154, hidden_dim=128, out_dim=150,
+        num_heads=4, num_layers=3, edge_dim=4, dropout=0.1,
+    ).to(_device)
+
+    trainer = SVDDTrainer(gnn_model, _device, nu=req.svdd_nu, lr=req.lr)
+    try:
+        trainer.initialize_center(dataloader)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"failed to initialize SVDD center: {e}"
+        )
+
+    trainer.fit(dataloader, epochs=req.epochs)
+
+    # Save checkpoint
+    output_path = Path(os.environ.get(
+        "AGENTSHIELD_ML_MODEL_PATH",
+        str(Path(__file__).resolve().parent.parent.parent.parent / "models" / "gnn_svdd.pt"),
+    ))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    trainer.save(str(output_path))
+
+    # Store in app state for inference
+    from ..gnn.inference import GNNInference
+    app.state.gnn_model_state = {
+        "model_state": gnn_model.state_dict(),
+        "center": trainer.center,
+        "r_max": trainer.r_max,
+    }
+    app.state.gnn_inference = GNNInference(
+        model=gnn_model, trainer=trainer, device=_device,
+    )
+    app.state.gnn_available = True
+
+    return GNNTrainResponse(
+        status="ok",
+        num_graphs=len(graphs),
+        num_normal=len(normal_graphs),
+        final_loss=round(trainer.train_losses[-1], 6) if trainer.train_losses else 0.0,
+        r_max=round(trainer.r_max, 6),
+        center_norm=round(trainer.center.norm().item(), 6),
+        checkpoint_path=str(output_path),
     )
 
 
