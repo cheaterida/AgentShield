@@ -7,11 +7,25 @@ import { api } from '../api/client';
 const SEVERITIES = ['', 'low', 'medium', 'high', 'critical'];
 const STATUSES = ['', 'open', 'acknowledged', 'resolved', 'dismissed'];
 
+const statusBadge: Record<string, React.CSSProperties> = {
+  open: { background: '#fee2e2', color: '#dc2626' },
+  acknowledged: { background: '#fef3c7', color: '#b45309' },
+  resolved: { background: '#d1fae5', color: '#047857' },
+  dismissed: { background: '#f1f5f9', color: '#64748b' },
+};
+
+const statusLabel: Record<string, string> = {
+  open: '待处理',
+  acknowledged: '已确认',
+  resolved: '已解决',
+  dismissed: '已忽略',
+};
+
 export function AlertsPage() {
   const [severity, setSeverity] = useState('');
   const [status, setStatus] = useState('');
   const params = [severity && `severity=${severity}`, status && `status=${status}`].filter(Boolean).join('&');
-  const { alerts, total, loading, refresh } = useAlerts(params || undefined);
+  const { alerts, total, loading, error, refresh } = useAlerts(params || undefined);
 
   const handleStatusChange = async (alertId: string, newStatus: string) => {
     try {
@@ -43,7 +57,13 @@ export function AlertsPage() {
         ))}
       </div>
 
-      {loading ? (
+      {error ? (
+        <div style={{ padding: 40, textAlign: 'center', background: '#fef2f2', borderRadius: 8, color: '#dc2626' }}>
+          <p style={{ fontWeight: 600, marginBottom: 8 }}>加载失败</p>
+          <p style={{ fontSize: 13 }}>{error}</p>
+          <button onClick={refresh} style={{ marginTop: 12, padding: '8px 16px', borderRadius: 8, border: '1px solid #fecaca', background: '#fff', color: '#dc2626', cursor: 'pointer', fontSize: 13 }}>重试</button>
+        </div>
+      ) : loading ? (
         <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>加载中...</div>
       ) : (
         <div style={{ background: '#fff', borderRadius: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.06)', overflow: 'hidden' }}>
@@ -70,7 +90,7 @@ export function AlertsPage() {
                     <td style={{ padding: '10px 16px', fontWeight: 500 }}>{a.title}</td>
                     <td style={{ padding: '10px 16px', color: '#64748b', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.description}</td>
                     <td style={{ padding: '10px 16px', color: '#6366f1' }}>{a.agent_id}</td>
-                    <td style={{ padding: '10px 16px' }}><SeverityBadge severity={a.status} /></td>
+                    <td style={{ padding: '10px 16px' }}><span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600, ...(statusBadge[a.status] || statusBadge.open) }}>{statusLabel[a.status] || a.status}</span></td>
                     <td style={{ padding: '10px 16px', fontSize: 12, color: '#94a3b8' }}>{new Date(a.occurred_at).toLocaleString()}</td>
                     <td style={{ padding: '10px 16px' }}>
                       {a.status === 'open' && (

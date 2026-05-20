@@ -38,7 +38,7 @@ impl ProbeManager {
             tracing::info!(
                 "eBPF probes configured (linux real mode): openat, execve, connect, bind"
             );
-            return Ok(count);
+            return Ok(count as usize);
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -76,7 +76,7 @@ impl ProbeManager {
             let agent_id = self.agent_id.clone();
             let family_group_id = self.family_group_id.clone();
             tokio::spawn(async move {
-                if let Err(e) = run_real_ebpf_reader(agent_id, family_group_id, buffer).await {
+                if let Err(e) = run_real_ebpf_reader(agent_id, family_group_id, buffer.clone()).await {
                     tracing::warn!("real eBPF reader failed ({}), falling back to demo mode", e);
                     // Fall back to demo mode on failure
                     run_demo_reader(buffer).await;
@@ -113,17 +113,17 @@ async fn run_real_ebpf_reader(
     // Embed pre-compiled eBPF bytecode at compile time.
     // Path: relative to this source file → project target dir.
     let bytecode = include_bytes_aligned!(
-        "../target/bpfel-unknown-none/release/agentshield-ebpf"
+        "../../target/bpfel-unknown-none/release/agentshield-ebpf"
     );
     let mut bpf = Bpf::load(bytecode)
         .map_err(|e| format!("failed to load eBPF bytecode: {}", e))?;
 
     // Attach syscall tracepoints
     let tracepoints: [(&str, &str, &str); 4] = [
-        ("syscalls", "sys_enter_openat", "agentshield_syscall_enter_openat"),
-        ("syscalls", "sys_enter_execve", "agentshield_syscall_enter_execve"),
-        ("syscalls", "sys_enter_connect", "agentshield_syscall_enter_connect"),
-        ("syscalls", "sys_enter_bind", "agentshield_syscall_enter_bind"),
+        ("syscalls", "sys_enter_openat", "agentshield_sys_enter_openat"),
+        ("syscalls", "sys_enter_execve", "agentshield_sys_enter_execve"),
+        ("syscalls", "sys_enter_connect", "agentshield_sys_enter_connect"),
+        ("syscalls", "sys_enter_bind", "agentshield_sys_enter_bind"),
     ];
 
     let mut attached = 0u32;
@@ -151,10 +151,11 @@ async fn run_real_ebpf_reader(
     }
     tracing::info!("{} eBPF tracepoints attached successfully", attached);
 
-    // Open PerfEventArray and spawn per-CPU reader tasks
-    let mut perf_array: AsyncPerfEventArray<_> = bpf
-        .map_mut("EVENTS")
-        .ok_or("eBPF map 'EVENTS' not found")?
+    // Take ownership of the EVENTS map so spawned tasks don't borrow bpf
+    let events_map = bpf
+        .take_map("EVENTS")
+        .ok_or("eBPF map 'EVENTS' not found")?;
+    let mut perf_array: AsyncPerfEventArray<_> = events_map
         .try_into()
         .map_err(|e| format!("failed to open EVENTS perf array: {}", e))?;
 
@@ -189,6 +190,13 @@ async fn run_real_ebpf_reader(
                                         chunk.as_ptr() as *const ProbeEvent
                                     )
                                 };
+                                if event.magic != 0xE5 {
+                                    tracing::warn!(
+                                        "bad ProbeEvent magic: expected 0xE5, got 0x{:X}",
+                                        event.magic
+                                    );
+                                    continue;
+                                }
                                 let payload =
                                     probe_event_conv::convert(&event, &a_id, &fg_id);
                                 if payload.resource_ref.is_empty()

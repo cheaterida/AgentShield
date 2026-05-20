@@ -19,18 +19,29 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const reconnectRef = useRef(0);
 
   const connect = useCallback(() => {
+    let mounted = true;
+    let pingInterval: ReturnType<typeof setInterval> | null = null;
+
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${location.host}/api/v1/ws/events`);
     wsRef.current = ws;
 
     ws.onopen = () => {
+      if (!mounted) { ws.close(); return; }
       setConnected(true);
       reconnectRef.current = 0;
+
+      pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 30000);
     };
 
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
+        if (msg.type === 'pong') return;
         const cbs = subsRef.current.get(msg.type);
         if (cbs) cbs.forEach((cb) => cb(msg.payload));
       } catch {
@@ -38,17 +49,32 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       }
     };
 
+    ws.onerror = () => {
+      // onclose will fire after onerror, triggering reconnect
+      console.debug('[ws] connection error, will retry...');
+    };
+
     ws.onclose = () => {
+      if (pingInterval) clearInterval(pingInterval);
+      if (!mounted) return;
       setConnected(false);
       const delay = Math.min(1000 * 2 ** reconnectRef.current, 30000);
       reconnectRef.current++;
       setTimeout(connect, delay);
     };
+
+    return () => {
+      mounted = false;
+      if (pingInterval) clearInterval(pingInterval);
+    };
   }, []);
 
   useEffect(() => {
-    connect();
-    return () => wsRef.current?.close();
+    const cleanup = connect();
+    return () => {
+      cleanup();
+      wsRef.current?.close();
+    };
   }, [connect]);
 
   const subscribe = useCallback((type: string, cb: WSCallback) => {

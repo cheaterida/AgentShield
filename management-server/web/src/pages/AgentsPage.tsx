@@ -7,7 +7,7 @@ const FILTERS = ['', 'online', 'offline', 'suspicious', 'degraded'];
 
 export function AgentsPage() {
   const [statusFilter, setStatusFilter] = useState('');
-  const { agents, loading } = useAgents(statusFilter || undefined);
+  const { agents, loading, error, refresh } = useAgents(statusFilter || undefined);
 
   return (
     <div>
@@ -36,7 +36,13 @@ export function AgentsPage() {
         ))}
       </div>
 
-      {loading ? (
+      {error ? (
+        <div style={{ padding: 40, textAlign: 'center', background: '#fef2f2', borderRadius: 8, color: '#dc2626' }}>
+          <p style={{ fontWeight: 600, marginBottom: 8 }}>加载失败</p>
+          <p style={{ fontSize: 13 }}>{error}</p>
+          <button onClick={refresh} style={{ marginTop: 12, padding: '8px 16px', borderRadius: 8, border: '1px solid #fecaca', background: '#fff', color: '#dc2626', cursor: 'pointer', fontSize: 13 }}>重试</button>
+        </div>
+      ) : loading ? (
         <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>加载中...</div>
       ) : (
         <div style={{ background: '#fff', borderRadius: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.06)', overflow: 'hidden' }}>

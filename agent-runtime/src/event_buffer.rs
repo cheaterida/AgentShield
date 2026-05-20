@@ -43,6 +43,10 @@ impl EventBuffer {
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().unwrap().is_empty()
+    }
 }
 
 #[cfg(test)]

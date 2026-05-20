@@ -24,4 +24,4 @@ bytes = "1"
 num_cpus = "1"
 
 [dev-dependencies]
-tokio-test = "0.4"
+mockito = { version = "1", default-features = false }

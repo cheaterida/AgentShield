@@ -60,6 +60,8 @@ export const api = {
     request<{ bundles: import('./types').PolicyBundle[] }>('/policies/bundles'),
   createPolicyBundle: (body: unknown) =>
     request('/policies/bundles', { method: 'POST', body: JSON.stringify(body) }),
+  activatePolicyBundle: (version: string) =>
+    request(`/policies/bundles/${encodeURIComponent(version)}/activate`, { method: 'PUT' }),
 
   // Alerts
   listAlerts: (params?: string) =>
@@ -71,6 +73,16 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ status }),
     }),
+
+  // Traces — grouped from audit events on frontend; a dedicated Python trace service
+  // (serve-web.py :8081 querying ClickHouse) is planned for rich LLM-content traces.
+  listTraces: (params?: string) =>
+    request<{ events: import('./types').AuditEvent[]; total: number }>(
+      `/audit/events${params ? `?${params}` : ''}`
+    ),
+  // listFamilyGroupsWithAgents — composed client-side from listFamilyGroups + listAgents.
+  listFamilyGroupsWithAgents: () =>
+    request<{ groups: import('./types').FamilyGroup[] }>('/family-groups'),
 
   // Dashboard
   getDashboardStats: (familyGroupId?: string) =>

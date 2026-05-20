@@ -1,4 +1,4 @@
-import { useContext } from 'react';
+import { useContext, Component, type ReactNode } from 'react';
 import { NavLink, Outlet, Route, Routes } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -9,6 +9,8 @@ import {
   Users,
   Wifi,
   WifiOff,
+  Radio,
+  Activity,
 } from 'lucide-react';
 import { WebSocketContext } from './context/WebSocketContext';
 import { DashboardPage } from './pages/DashboardPage';
@@ -18,10 +20,46 @@ import { AuditLogPage } from './pages/AuditLogPage';
 import { AlertsPage } from './pages/AlertsPage';
 import { PoliciesPage } from './pages/PoliciesPage';
 import { FamilyGroupsPage } from './pages/FamilyGroupsPage';
+import { TracesPage } from './pages/TracesPage';
+import { SecurityEventsPage } from './pages/SecurityEventsPage';
+
+// Error boundary to catch render-time crashes and show debug info instead of blank screen.
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: { componentStack: string }) {
+    console.error('[ErrorBoundary] page crash:', error.message);
+    console.error('[ErrorBoundary] component stack:', info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 48, margin: 24, background: '#fef2f2', borderRadius: 12, border: '1px solid #fecaca' }}>
+          <h2 style={{ color: '#dc2626', marginBottom: 12 }}>页面渲染崩溃</h2>
+          <p style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, color: '#1e293b' }}>{this.state.error.message}</p>
+          <pre style={{ fontSize: 11, color: '#64748b', whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: '#fff', padding: 12, borderRadius: 6, maxHeight: 300, overflow: 'auto' }}>
+            {this.state.error.stack}
+          </pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: '仪表盘' },
   { to: '/agents', icon: Bot, label: '智能体' },
+  { to: '/traces', icon: Radio, label: '链路追踪' },
+  { to: '/security-events', icon: Activity, label: '安全事件' },
   { to: '/audit-log', icon: ScrollText, label: '审计日志' },
   { to: '/alerts', icon: AlertTriangle, label: '安全告警' },
   { to: '/policies', icon: Shield, label: '策略管理' },
@@ -100,7 +138,9 @@ function Layout() {
         </div>
       </aside>
       <main style={{ flex: 1, padding: 24, overflow: 'auto' }}>
-        <Outlet />
+        <ErrorBoundary>
+          <Outlet />
+        </ErrorBoundary>
       </main>
     </div>
   );
@@ -113,6 +153,8 @@ export function App() {
         <Route path="/" element={<DashboardPage />} />
         <Route path="/agents" element={<AgentsPage />} />
         <Route path="/agents/:id" element={<AgentDetailPage />} />
+        <Route path="/traces" element={<TracesPage />} />
+        <Route path="/security-events" element={<SecurityEventsPage />} />
         <Route path="/audit-log" element={<AuditLogPage />} />
         <Route path="/alerts" element={<AlertsPage />} />
         <Route path="/policies" element={<PoliciesPage />} />

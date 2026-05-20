@@ -8,32 +8,45 @@ export function AgentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [agent, setAgent] = useState<Agent | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
-  const fetchAgent = useCallback(async () => {
+  const fetchAgent = useCallback(async (silent?: boolean) => {
     if (!id) return;
     try {
       setAgent(await api.getAgent(id));
+      setError(null);
     } catch (e) {
-      console.error(e);
+      if (!silent) setError(e instanceof Error ? e.message : '加载智能体详情失败');
     }
   }, [id]);
 
-  const fetchEvents = useCallback(async () => {
+  const fetchEvents = useCallback(async (silent?: boolean) => {
     if (!id) return;
     try {
       const data = await api.listAuditEvents(`agent_id=${id}&limit=20`);
       setEvents(data.events);
+      setError(null);
     } catch (e) {
-      console.error(e);
+      if (!silent) setError(e instanceof Error ? e.message : '加载审计事件失败');
     }
   }, [id]);
 
   useEffect(() => {
     fetchAgent();
     fetchEvents();
-    const t = setInterval(() => { fetchAgent(); fetchEvents(); }, 10000);
+    const t = setInterval(() => { fetchAgent(true); fetchEvents(true); }, 10000);
     return () => clearInterval(t);
   }, [fetchAgent, fetchEvents]);
+
+  if (error) {
+    return (
+      <div style={{ padding: 40, textAlign: 'center', background: '#fef2f2', borderRadius: 8, color: '#dc2626' }}>
+        <p style={{ fontWeight: 600, marginBottom: 8 }}>加载失败</p>
+        <p style={{ fontSize: 13 }}>{error}</p>
+        <button onClick={() => { fetchAgent(); fetchEvents(); }} style={{ marginTop: 12, padding: '8px 16px', borderRadius: 8, border: '1px solid #fecaca', background: '#fff', color: '#dc2626', cursor: 'pointer', fontSize: 13 }}>重试</button>
+      </div>
+    );
+  }
 
   if (!agent) {
     return <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>加载中...</div>;

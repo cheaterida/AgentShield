@@ -1,11 +1,31 @@
 #!/usr/bin/env python3
-"""Serve management-server Web UI + API proxy + ClickHouse trace queries.
+"""AgentShield Web 控制台 — SPA 服务 + API 代理 + ClickHouse Trace 查询。
 
 Usage: python serve-web.py [port]
 
   http://localhost:8081          → Web UI (SPA)
-  http://localhost:8081/api/...  → Proxied to management-server :8080
-  http://localhost:8081/traces   → Trace viewer with input/output
+  http://localhost:8081/api/...  → 透明代理到 management-server :8080（除下述例外）
+
+── Trace API 唯一实现位置 ──
+
+serve-web.py 是 Trace API 的**唯一数据源**（ClickHouse agentshield.spans）。
+Go 后端 (router.go:42-44) 的 listTraces / listSpans / ingestSpans 端点返回 SQLite
+简化格式（不含 prompt/completion），应由 Stream 1 按合约 B 移除。
+
+  POST /api/v1/spans                        → serve-web.py 直接写入 ClickHouse
+  GET  /api/v1/traces                       → serve-web.py 直接查询 ClickHouse
+  GET  /api/v1/traces/<trace_id>            → serve-web.py 直接查询 ClickHouse
+  GET  /api/v1/traces/by-agent              → serve-web.py 直接查询 ClickHouse
+  GET  /api/v1/family-groups-with-agents    → serve-web.py 聚合（调 Go API 后组装）
+
+所有其他 /api/* 路径透明代理到 Go :8080（含 POST /api/v1/audit/events — OPA 由 Go 全权负责）。
+前端 TraceSpan / TraceGroup 类型以此处返回格式为权威契约（见 stream-3-python-api.md 合约 #10）。
+
+已知微小偏差（非破坏性）：
+  - _list_traces / _traces_by_agent SELECT 未包含 parent_id, status_code, agent_id, family_group_id；
+    _get_trace_detail 包含 parent_id, status_code 但未含 agent_id, family_group_id。
+    前端 TraceSpan 这些字段会收到 undefined，当前页面未使用它们故无影响。
+  - CH events 子对象包含 timestamp 字段，前端 SpanEvent 类型未声明（运行时被忽略）。
 """
 
 import http.server
@@ -76,7 +96,9 @@ def ch_insert_spans(spans: list[dict]) -> int:
 
 
 def opa_evaluate(path: str, input_data: dict) -> dict:
-    """Query OPA for policy evaluation. Returns the 'result' dict or empty dict on error."""
+    """@deprecated — OPA evaluation is now handled by the Go backend (Stream 1).
+    Kept for reference only. Do not call from active code paths."""
+
     import requests as _requests
     try:
         resp = _requests.post(
@@ -91,7 +113,8 @@ def opa_evaluate(path: str, input_data: dict) -> dict:
 
 
 def opa_evaluate_audit_events(events: list[dict]) -> list[dict]:
-    """Evaluate audit events against OPA policy. Returns policy violation alerts."""
+    """@deprecated — OPA evaluation of audit events is now handled by the Go backend (Stream 1).
+    Kept for reference only. Do not call from active code paths."""
     if not OPA_ENABLED:
         return []
     alerts = []
@@ -192,9 +215,7 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        if path == "/traces" or path == "/traces/":
-            self._serve_traces_page()
-        elif path.startswith("/api/v1/traces/by-agent"):
+        if path.startswith("/api/v1/traces/by-agent"):
             self._traces_by_agent(parsed.query)
         elif path.startswith("/api/v1/traces/"):
             self._get_trace_detail(path)
@@ -217,9 +238,7 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/api/v1/audit/events":
-            self._audit_events_with_opa()
-        elif parsed.path == "/api/v1/spans":
+        if parsed.path == "/api/v1/spans":
             self._ingest_spans()
         else:
             self._proxy()
@@ -274,7 +293,9 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(f'{{"error":"proxy failed: {e}"}}'.encode())
 
     def _audit_events_with_opa(self):
-        """Intercept audit event POST, evaluate with OPA, inject results, forward to backend."""
+        """@deprecated — audit/events is now transparently proxied to Go backend (Stream 1).
+        OPA evaluation is the Go backend's sole responsibility per 合约 A.
+        Kept for reference only. Do not call from active code paths."""
         content_len = int(self.headers.get("Content-Length", 0))
         if content_len <= 0:
             self._proxy()
@@ -601,10 +622,12 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
                 g_agents = [a for a in agents if a.get("family_group_id") == gid]
                 groups_with_agents.append({
                     "id": gid,
-                    "name": g.get("name", gid),
+                    "name": g.get("display_name", gid),
+                    "display_name": g.get("display_name", gid),
                     "agent_count": len(g_agents),
                     "agents": [
-                        {"id": a["id"], "name": a.get("name", a["id"]),
+                        {"id": a["id"], "name": a.get("display_name", a["id"]),
+                         "display_name": a.get("display_name", a["id"]),
                          "hostname": a.get("hostname", ""), "status": a.get("status", "unknown")}
                         for a in g_agents
                     ],
@@ -615,9 +638,11 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
                 groups_with_agents.append({
                     "id": "__ungrouped__",
                     "name": "未分组",
+                    "display_name": "未分组",
                     "agent_count": len(orphan_agents),
                     "agents": [
-                        {"id": a["id"], "name": a.get("name", a["id"]),
+                        {"id": a["id"], "name": a.get("display_name", a["id"]),
+                         "display_name": a.get("display_name", a["id"]),
                          "hostname": a.get("hostname", ""), "status": a.get("status", "unknown")}
                         for a in orphan_agents
                     ],
@@ -627,402 +652,12 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self._json_resp(500, {"error": str(e)})
 
-    def _serve_traces_page(self):
-        html = TRACES_HTML
-        self.send_response(200)
-        self._cors_headers()
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(html.encode("utf-8"))
-
     def _json_resp(self, status: int, data: dict):
         self.send_response(status)
         self._cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False, default=str).encode("utf-8"))
-
-
-# ── Trace viewer HTML ──
-
-TRACES_HTML = r"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Traces — AgentShield</title>
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #f1f5f9; color: #1e293b; display: flex; height: 100vh; overflow: hidden; }
-/* ── Sidebar ── */
-.sidebar { width: 280px; min-width: 280px; background: #0f172a; color: #e2e8f0; display: flex; flex-direction: column; overflow: hidden; }
-.sidebar-header { padding: 16px 16px 12px; border-bottom: 1px solid #1e293b; }
-.sidebar-header h2 { font-size: 16px; font-weight: 700; }
-.sidebar-header a { color: #93c5fd; font-size: 12px; text-decoration: none; }
-.sidebar-header a:hover { text-decoration: underline; }
-.sidebar-nav { flex: 1; overflow-y: auto; padding: 8px 0; }
-.sidebar-nav::-webkit-scrollbar { width: 4px; }
-.sidebar-nav::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
-.nav-all { display: flex; align-items: center; gap: 8px; padding: 10px 16px; cursor: pointer; font-size: 13px; font-weight: 600; color: #e2e8f0; border-left: 3px solid transparent; transition: all 0.15s; }
-.nav-all:hover { background: #1e293b; }
-.nav-all.active { background: #1e293b; border-left-color: #6366f1; color: #a5b4fc; }
-.group-item { margin-top: 4px; }
-.group-header { display: flex; align-items: center; gap: 8px; padding: 10px 16px; cursor: pointer; font-size: 13px; font-weight: 600; color: #94a3b8; transition: all 0.15s; }
-.group-header:hover { background: #1e293b; color: #cbd5e1; }
-.group-arrow { font-size: 10px; width: 12px; text-align: center; transition: transform 0.2s; flex-shrink: 0; }
-.group-item.open .group-arrow { transform: rotate(90deg); }
-.group-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.group-count { font-size: 11px; color: #64748b; }
-.agent-list { display: none; }
-.group-item.open .agent-list { display: block; }
-.agent-item { display: flex; align-items: center; gap: 8px; padding: 8px 16px 8px 40px; cursor: pointer; font-size: 13px; color: #94a3b8; border-left: 3px solid transparent; transition: all 0.15s; }
-.agent-item:hover { background: #1e293b; color: #e2e8f0; }
-.agent-item.active { background: #1e293b; border-left-color: #6366f1; color: #c7d2fe; }
-.agent-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.agent-dot.online { background: #22c55e; }
-.agent-dot.offline { background: #ef4444; }
-.agent-dot.unknown { background: #64748b; }
-.agent-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.loading-tree { padding: 20px 16px; font-size: 13px; color: #64748b; }
-/* ── Main ── */
-.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-.main-header { background: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e2e8f0; }
-.main-header .title { font-size: 16px; font-weight: 700; color: #1e293b; }
-.main-header .subtitle { font-size: 12px; color: #64748b; margin-left: 8px; }
-.header-right { display: flex; align-items: center; gap: 12px; }
-.header-right a { color: #6366f1; font-size: 13px; text-decoration: none; }
-.header-right a:hover { text-decoration: underline; }
-.content { flex: 1; overflow-y: auto; padding: 20px 24px; }
-.content::-webkit-scrollbar { width: 6px; }
-.content::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-/* ── Trace Cards ── */
-.trace-card { background: #fff; border-radius: 10px; margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); overflow: hidden; }
-.trace-header { padding: 12px 18px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; border-bottom: 1px solid #f1f5f9; }
-.trace-header:hover { background: #f8fafc; }
-.trace-header .left { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
-.trace-header .right { font-size: 12px; color: #64748b; flex-shrink: 0; }
-.trace-id { font-family: 'SF Mono','Consolas',monospace; font-size: 12px; color: #6366f1; }
-.span-count { background: #e2e8f0; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; flex-shrink: 0; }
-.span-list { display: none; }
-.trace-card.open .span-list { display: block; }
-.span-item { padding: 10px 18px; border-bottom: 1px solid #f8fafc; cursor: pointer; }
-.span-item:hover { background: #f8fafc; }
-.span-item.expanded { background: #fffbeb; }
-.span-row { display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
-.span-name { font-weight: 600; min-width: 180px; }
-.span-duration { font-size: 12px; color: #f59e0b; min-width: 70px; }
-.span-time { font-size: 11px; color: #94a3b8; min-width: 160px; }
-.span-tokens { font-size: 11px; color: #10b981; min-width: 100px; }
-.span-model { font-size: 11px; color: #6366f1; }
-.span-attrs { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; }
-.attr-tag { background: #f1f5f9; padding: 1px 6px; border-radius: 3px; font-size: 10px; color: #475569; white-space: nowrap; }
-.span-detail { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e2e8f0; }
-.span-item.expanded .span-detail { display: block; }
-.content-block { margin-bottom: 12px; }
-.content-block h4 { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #64748b; margin-bottom: 5px; }
-.content-block pre { background: #1e293b; color: #e2e8f0; padding: 12px; border-radius: 6px; font-size: 11px; line-height: 1.5; max-height: 350px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
-.msg-item { margin-bottom: 8px; padding: 8px; background: #f8fafc; border-radius: 6px; border-left: 3px solid #6366f1; }
-.msg-content { font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #334155; }
-.tool-call { margin-left: 12px; padding: 4px 8px; background: #fef3c7; border-radius: 4px; font-size: 11px; margin-top: 3px; }
-.role { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; margin-bottom: 3px; }
-.role-system { background: #fce7f3; color: #be185d; }
-.role-user { background: #dbeafe; color: #1d4ed8; }
-.role-assistant { background: #d1fae5; color: #047857; }
-.role-tool { background: #fef3c7; color: #b45309; }
-.badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; }
-.badge-llm { background: #ede9fe; color: #7c3aed; }
-.badge-framework { background: #dbeafe; color: #2563eb; }
-.badge-vectordb { background: #fce7f3; color: #db2777; }
-.badge-other { background: #f1f5f9; color: #64748b; }
-.expand-hint { font-size: 10px; color: #94a3b8; }
-.state-msg { text-align: center; padding: 48px 20px; color: #94a3b8; }
-.state-msg.loading { }
-.state-msg.empty { }
-.state-msg.error { background: #fef2f2; color: #dc2626; border-radius: 8px; margin: 16px 0; }
-.state-msg small { display: block; margin-top: 6px; font-size: 12px; }
-.spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid #e2e8f0; border-top-color: #6366f1; border-radius: 50%; animation: spin 0.8s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-</style>
-</head>
-<body>
-<!-- ── Sidebar ── -->
-<div class="sidebar">
-  <div class="sidebar-header">
-    <h2>🔍 链路追踪</h2>
-    <a href="/">← 返回仪表盘</a>
-  </div>
-  <div class="sidebar-nav" id="sidebarNav">
-    <div class="loading-tree">加载中...</div>
-  </div>
-</div>
-<!-- ── Main content ── -->
-<div class="main">
-  <div class="main-header">
-    <div>
-      <span class="title" id="contentTitle">全部 Traces</span>
-      <span class="subtitle" id="contentSubtitle"></span>
-    </div>
-    <div class="header-right">
-      <a href="/">仪表盘</a>
-      <a href="/audit-log">审计日志</a>
-    </div>
-  </div>
-  <div class="content" id="app">
-    <div class="state-msg loading"><div class="spinner"></div><br><small>加载中...</small></div>
-  </div>
-</div>
-<script>
-const BASE = '/api/v1';
-var currentAgentId = null;
-var currentFamilyGroupId = null;
-var allAgents = [];
-
-// ── Sidebar ──
-async function loadSidebar() {
-  var nav = document.getElementById('sidebarNav');
-  try {
-    var resp = await fetch(BASE + '/family-groups-with-agents');
-    var data = await resp.json();
-    var groups = data.groups || [];
-    // Collect all agents for lookup
-    allAgents = [];
-    groups.forEach(function(g) { allAgents = allAgents.concat(g.agents); });
-
-    var html = '';
-
-    // "All traces" item
-    html += '<div class="nav-all active" onclick="selectAllTraces()" id="navAll">📊 全部 Traces</div>';
-
-    if (groups.length === 0) {
-      html += '<div class="loading-tree" style="padding:12px 16px">暂无家庭组</div>';
-    } else {
-      groups.forEach(function(g, gi) {
-        var open = gi === 0 ? ' open' : '';
-        html += '<div class="group-item' + open + '">';
-        html += '<div class="group-header" onclick="toggleGroup(this)">';
-        html += '<span class="group-arrow">▶</span>';
-        html += '<span class="group-name" title="' + esc(g.name) + '">🏠 ' + esc(g.name) + '</span>';
-        html += '<span class="group-count">' + g.agent_count + '</span>';
-        html += '</div>';
-        html += '<div class="agent-list">';
-        if (g.agents.length === 0) {
-          html += '<div class="loading-tree" style="padding:4px 16px 4px 40px;font-size:12px">暂无 Agent</div>';
-        } else {
-          g.agents.forEach(function(a) {
-            var dotClass = a.status === 'online' ? 'online' : a.status === 'offline' ? 'offline' : 'unknown';
-            html += '<div class="agent-item" data-agent-id="' + esc(a.id) + '" data-group-id="' + esc(g.id) + '" onclick="selectAgent(\'' + esc(a.id) + '\', \'' + esc(g.id) + '\', this)">';
-            html += '<span class="agent-dot ' + dotClass + '"></span>';
-            html += '<span class="agent-name" title="' + esc(a.name || a.hostname || a.id) + '">' + esc(a.name || a.hostname || a.id) + '</span>';
-            html += '</div>';
-          });
-        }
-        html += '</div></div>';
-      });
-    }
-    nav.innerHTML = html;
-  } catch (e) {
-    nav.innerHTML = '<div class="loading-tree" style="color:#ef4444">加载失败: ' + esc(e.message) + '</div>';
-  }
-}
-
-function toggleGroup(header) {
-  header.parentElement.classList.toggle('open');
-}
-
-function selectAllTraces() {
-  currentAgentId = null;
-  currentFamilyGroupId = null;
-  document.getElementById('contentTitle').textContent = '全部 Traces';
-  document.getElementById('contentSubtitle').textContent = '';
-  // Update sidebar active states
-  document.querySelectorAll('.nav-all,.agent-item').forEach(function(el) { el.classList.remove('active'); });
-  document.getElementById('navAll').classList.add('active');
-  loadTraces();
-}
-
-function selectAgent(agentId, groupId, el) {
-  currentAgentId = agentId;
-  currentFamilyGroupId = groupId;
-  // Find agent name
-  var agent = allAgents.find(function(a) { return a.id === agentId; });
-  var name = agent ? (agent.name || agent.hostname || agent.id) : agentId;
-  document.getElementById('contentTitle').textContent = name;
-  document.getElementById('contentSubtitle').textContent = 'Agent: ' + agentId;
-  // Update active states
-  document.querySelectorAll('.nav-all,.agent-item').forEach(function(el) { el.classList.remove('active'); });
-  el.classList.add('active');
-  // Expand parent group
-  var groupItem = el.closest('.group-item');
-  if (groupItem) groupItem.classList.add('open');
-  loadTracesByAgent(agentId);
-}
-
-// ── Traces loading ──
-async function loadTraces() {
-  var app = document.getElementById('app');
-  app.innerHTML = '<div class="state-msg loading"><div class="spinner"></div><br><small>加载中...</small></div>';
-  try {
-    var resp = await fetch(BASE + '/traces?limit=50');
-    var data = await resp.json();
-    if (!data.traces || data.traces.length === 0) {
-      app.innerHTML = '<div class="state-msg empty">暂无 trace 数据<br><small>请确保 agent 正在运行并产生 LLM 调用</small></div>';
-      return;
-    }
-    renderTraces(data.traces);
-  } catch (e) {
-    app.innerHTML = '<div class="state-msg error">加载失败: ' + esc(e.message) + '</div>';
-  }
-}
-
-async function loadTracesByAgent(agentId) {
-  var app = document.getElementById('app');
-  app.innerHTML = '<div class="state-msg loading"><div class="spinner"></div><br><small>加载中...</small></div>';
-  try {
-    var resp = await fetch(BASE + '/traces/by-agent?agent_id=' + encodeURIComponent(agentId) + '&limit=50');
-    var data = await resp.json();
-    if (!data.traces || data.traces.length === 0) {
-      app.innerHTML = '<div class="state-msg empty">该 Agent 暂无 trace 数据<br><small>Agent ID: ' + esc(agentId) + '</small></div>';
-      return;
-    }
-    renderTraces(data.traces);
-  } catch (e) {
-    app.innerHTML = '<div class="state-msg error">加载失败: ' + esc(e.message) + '</div>';
-  }
-}
-
-function renderTraces(traces) {
-  var app = document.getElementById('app');
-  var html = '';
-  for (var i = 0; i < traces.length; i++) {
-    html += renderTrace(traces[i]);
-  }
-  app.innerHTML = html;
-
-  // Trace header toggle
-  document.querySelectorAll('.trace-header').forEach(function(hdr) {
-    hdr.addEventListener('click', function(e) {
-      e.stopPropagation();
-      hdr.parentElement.classList.toggle('open');
-    });
-  });
-
-  // Span expand toggle
-  document.querySelectorAll('.span-item').forEach(function(item) {
-    item.addEventListener('click', function(e) {
-      e.stopPropagation();
-      item.classList.toggle('expanded');
-    });
-  });
-}
-
-// ── Render helpers ──
-function renderMessages(events) {
-  if (!Array.isArray(events)) return '';
-
-  var promptEv = events.find(function(e) { return e.name === 'gen_ai.content.prompt'; });
-  var completionEv = events.find(function(e) { return e.name === 'gen_ai.content.completion'; });
-  var html = '';
-
-  function renderMsgList(raw) {
-    var messages;
-    try { messages = typeof raw === 'string' ? JSON.parse(raw) : raw; }
-    catch(e) { return '<pre>' + esc(String(raw)) + '</pre>'; }
-    if (!Array.isArray(messages)) return '<pre>' + esc(String(raw)) + '</pre>';
-
-    var out = '';
-    for (var i = 0; i < messages.length; i++) {
-      var msg = messages[i];
-      var role = msg.role || 'unknown';
-      var roleClass = 'role-' + role;
-      var content = msg.content || '';
-      if (Array.isArray(content)) {
-        content = content.map(function(c) { return typeof c === 'object' ? JSON.stringify(c) : String(c); }).join('\n');
-      }
-
-      var toolsHtml = '';
-      if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
-        for (var j = 0; j < msg.tool_calls.length; j++) {
-          var tc = msg.tool_calls[j];
-          toolsHtml += '<div class="tool-call"><strong>🔧 ' + esc(tc.function ? tc.function.name : 'tool') + '</strong><br><small>' + esc(JSON.stringify(tc.function ? tc.function.arguments : '', null, 2)) + '</small></div>';
-        }
-      }
-
-      out += '<div class="msg-item"><span class="role ' + roleClass + '">' + role.toUpperCase() + '</span>';
-      if (content) out += '<div class="msg-content">' + esc(String(content)) + '</div>';
-      out += toolsHtml + '</div>';
-    }
-    return out;
-  }
-
-  if (promptEv && promptEv.attributes && promptEv.attributes['gen_ai.prompt']) {
-    html += '<div class="content-block"><h4>📥 Input (Prompt)</h4>' + renderMsgList(promptEv.attributes['gen_ai.prompt']) + '</div>';
-  }
-  if (completionEv && completionEv.attributes && completionEv.attributes['gen_ai.completion']) {
-    html += '<div class="content-block"><h4>📤 Output (Completion)</h4>' + renderMsgList(completionEv.attributes['gen_ai.completion']) + '</div>';
-  }
-  return html;
-}
-
-function renderTrace(trace) {
-  var spans = trace.spans || [];
-  var firstSpan = spans[0] || {};
-  var attrs = firstSpan.attributes || {};
-  var serviceType = attrs['langtrace.service.type'] || '';
-  var serviceName = attrs['langtrace.service.name'] || '';
-  var badgeClass = serviceType === 'llm' ? 'badge-llm' : serviceType === 'framework' ? 'badge-framework' : serviceType === 'vectordb' ? 'badge-vectordb' : 'badge-other';
-
-  var spansHtml = spans.map(function(s) {
-    var a = s.attributes || {};
-    var inputTokens = a['gen_ai.usage.input_tokens'] || '';
-    var outputTokens = a['gen_ai.usage.output_tokens'] || '';
-    var model = a['gen_ai.request.model'] || a['gen_ai.response.model'] || '';
-    var duration = s.duration ? (s.duration / 1000).toFixed(2) + 's' : '';
-    var events = s.events || [];
-    var hasContent = Array.isArray(events) && events.length > 0;
-    var tagKeys = ['gen_ai.operation.name', 'gen_ai.system', 'langtrace.service.name', 'url.path'];
-    var tags = tagKeys.filter(function(k) { return a[k]; }).map(function(k) { return '<span class="attr-tag">' + esc(k.split('.').pop()) + ': ' + esc(a[k]) + '</span>'; }).join('');
-
-    return '<div class="span-item">'
-      + '<div class="span-row">'
-      + '<span class="span-name">' + esc(s.name) + '</span>'
-      + '<span class="span-duration">' + duration + '</span>'
-      + '<span class="span-tokens">' + (inputTokens ? 'in:'+inputTokens : '') + ' ' + (outputTokens ? 'out:'+outputTokens : '') + '</span>'
-      + '<span class="span-model">' + esc(String(model)) + '</span>'
-      + '<span class="span-time">' + (s.start_time || '') + '</span>'
-      + '<span class="span-attrs">' + tags + '</span>'
-      + (hasContent ? '<span class="expand-hint">▶ 点击查看内容</span>' : '')
-      + '</div>'
-      + (hasContent ? '<div class="span-detail">' + renderMessages(events) + '</div>' : '')
-      + '</div>';
-  }).join('');
-
-  return '<div class="trace-card open">'
-    + '<div class="trace-header">'
-    + '<div class="left">'
-    + '<span class="badge ' + badgeClass + '">' + (serviceType || 'span') + '</span>'
-    + '<span class="trace-id">' + esc(trace.trace_id) + '</span>'
-    + '<span class="span-count">' + spans.length + ' span' + (spans.length > 1 ? 's' : '') + '</span>'
-    + (serviceName ? '<span style="font-size:12px;color:#475569">' + esc(serviceName) + '</span>' : '')
-    + '</div>'
-    + '<div class="right">' + (trace.earliest || '') + '</div>'
-    + '</div>'
-    + '<div class="span-list">' + spansHtml + '</div>'
-    + '</div>';
-}
-
-function esc(s) {
-  var el = document.createElement('span');
-  el.textContent = String(s);
-  return el.innerHTML;
-}
-
-// ── Init ──
-loadSidebar();
-loadTraces();
-</script>
-</body>
-</html>"""
-
 
 if __name__ == "__main__":
     abs_web = os.path.abspath(WEB_DIR)
@@ -1050,7 +685,6 @@ if __name__ == "__main__":
 
     server = http.server.HTTPServer(("0.0.0.0", PORT), ProxyHandler)
     print(f"AgentShield Web UI → http://localhost:{PORT}")
-    print(f"Trace viewer      → http://localhost:{PORT}/traces")
     print(f"API proxy         → {API_BACKEND}")
     print("Ctrl+C to stop")
     try:

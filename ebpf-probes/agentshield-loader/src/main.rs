@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(events) => {
                         let available = bufs[0].len() / std::mem::size_of::<ProbeEvent>();
                         for _ in 0..available {
-                            // Perf events from Aya are read into BytesMut
+                            // discard — loader is test-only, events are not processed here
                         }
                         count.fetch_add(events.read as u64, Ordering::Relaxed);
                         // Forward raw bytes — in production, deserialize properly

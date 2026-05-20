@@ -1,5 +1,6 @@
 //! Hermes AI Agent 进程监管。
 
+use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
@@ -16,11 +17,37 @@ impl Supervisor {
 
     /// 启动 Hermes agent 子进程。
     pub fn start(&self, binary_path: &str) -> Result<(), String> {
-        let child = Command::new(binary_path)
+        let mut child = Command::new(binary_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("failed to start hermes: {}", e))?;
+
+        // Drain stdout to prevent pipe buffer deadlock (64KB limit).
+        if let Some(stdout) = child.stdout.take() {
+            tokio::task::spawn_blocking(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    match line {
+                        Ok(line) => tracing::info!(target: "hermes", "{}", line),
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
+        // Drain stderr to prevent pipe buffer deadlock (64KB limit).
+        if let Some(stderr) = child.stderr.take() {
+            tokio::task::spawn_blocking(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(line) => tracing::warn!(target: "hermes", "{}", line),
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
 
         tracing::info!(pid = child.id(), path = binary_path, "hermes started");
         *self.child.lock().unwrap() = Some(child);

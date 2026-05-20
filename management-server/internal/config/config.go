@@ -8,7 +8,6 @@ import (
 
 type Config struct {
 	HTTPAddr       string
-	GRPCAddr       string
 	DBDriver       string // "sqlite" or "postgres"
 	SQLitePath     string
 	PostgresDSN    string
@@ -21,7 +20,6 @@ type Config struct {
 func Load() Config {
 	return Config{
 		HTTPAddr:       getenv("AGENTSHIELD_HTTP_ADDR", ":8080"),
-		GRPCAddr:       getenv("AGENTSHIELD_GRPC_ADDR", ":9090"),
 		DBDriver:       getenv("AGENTSHIELD_DB_DRIVER", "sqlite"),
 		SQLitePath:     getenv("AGENTSHIELD_SQLITE_PATH", "./data/agentshield.db"),
 		PostgresDSN:    getenv("AGENTSHIELD_POSTGRES_DSN", ""),

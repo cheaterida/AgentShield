@@ -6,6 +6,7 @@ import type { FamilyGroup } from '../api/types';
 export function FamilyGroupsPage() {
   const [groups, setGroups] = useState<FamilyGroup[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<FamilyGroup | null>(null);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ id: '', display_name: '', labels: '' });
@@ -14,8 +15,9 @@ export function FamilyGroupsPage() {
     try {
       const data = await api.listFamilyGroups();
       setGroups(data.groups);
+      setError(null);
     } catch (e) {
-      console.error(e);
+      setError(e instanceof Error ? e.message : '加载家庭组列表失败');
     } finally {
       setLoading(false);
     }
@@ -89,7 +91,13 @@ export function FamilyGroupsPage() {
 
       {(editing || creating) && formComp}
 
-      {loading ? (
+      {error ? (
+        <div style={{ padding: 40, textAlign: 'center', background: '#fef2f2', borderRadius: 8, color: '#dc2626' }}>
+          <p style={{ fontWeight: 600, marginBottom: 8 }}>加载失败</p>
+          <p style={{ fontSize: 13 }}>{error}</p>
+          <button onClick={fetchGroups} style={{ marginTop: 12, padding: '8px 16px', borderRadius: 8, border: '1px solid #fecaca', background: '#fff', color: '#dc2626', cursor: 'pointer', fontSize: 13 }}>重试</button>
+        </div>
+      ) : loading ? (
         <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>加载中...</div>
       ) : (
         <div style={{ background: '#fff', borderRadius: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.06)', overflow: 'hidden' }}>

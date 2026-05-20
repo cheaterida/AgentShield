@@ -5,6 +5,7 @@
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ProbeEvent {
+    pub magic: u32,
     pub pid: u32,
     pub tid: u32,
     pub uid: u32,
@@ -19,6 +20,7 @@ pub struct ProbeEvent {
 impl Default for ProbeEvent {
     fn default() -> Self {
         Self {
+            magic: 0xE5,
             pid: 0,
             tid: 0,
             uid: 0,

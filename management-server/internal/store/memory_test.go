@@ -10,7 +10,7 @@ import (
 )
 
 func TestMemory_UpsertAndGetAgent(t *testing.T) {
-	s := NewMemory()
+	s := NewMemory(0)
 	ctx := context.Background()
 
 	agent := models.Agent{
@@ -21,9 +21,12 @@ func TestMemory_UpsertAndGetAgent(t *testing.T) {
 		t.Fatalf("UpsertAgent: %v", err)
 	}
 
-	got, err := s.GetAgent(ctx, "a1")
+	got, found, err := s.GetAgent(ctx, "a1")
 	if err != nil {
 		t.Fatalf("GetAgent: %v", err)
+	}
+	if !found {
+		t.Fatal("GetAgent: agent not found")
 	}
 	if got.ID != "a1" {
 		t.Errorf("got ID %s, want a1", got.ID)
@@ -31,7 +34,7 @@ func TestMemory_UpsertAndGetAgent(t *testing.T) {
 }
 
 func TestMemory_ListAgents_FilterByFamilyGroup(t *testing.T) {
-	s := NewMemory()
+	s := NewMemory(0)
 	ctx := context.Background()
 
 	s.UpsertAgent(ctx, models.Agent{
@@ -55,7 +58,7 @@ func TestMemory_ListAgents_FilterByFamilyGroup(t *testing.T) {
 }
 
 func TestMemory_ConcurrentSafety(t *testing.T) {
-	s := NewMemory()
+	s := NewMemory(0)
 	ctx := context.Background()
 	var wg sync.WaitGroup
 
@@ -76,7 +79,7 @@ func TestMemory_ConcurrentSafety(t *testing.T) {
 }
 
 func TestMemory_AuditEvents_RingBufferCap(t *testing.T) {
-	s := NewMemory()
+	s := NewMemory(0)
 	ctx := context.Background()
 
 	for i := 0; i < 15000; i++ {
@@ -95,7 +98,7 @@ func TestMemory_AuditEvents_RingBufferCap(t *testing.T) {
 }
 
 func TestMemory_FamilyGroupCRUD(t *testing.T) {
-	s := NewMemory()
+	s := NewMemory(0)
 	ctx := context.Background()
 
 	fg := models.FamilyGroup{
@@ -106,7 +109,10 @@ func TestMemory_FamilyGroupCRUD(t *testing.T) {
 		t.Fatalf("CreateFamilyGroup: %v", err)
 	}
 
-	got, _ := s.GetFamilyGroup(ctx, "fg1")
+	got, _, err := s.GetFamilyGroup(ctx, "fg1")
+	if err != nil {
+		t.Fatalf("GetFamilyGroup: %v", err)
+	}
 	if got.DisplayName != "FG1" {
 		t.Errorf("wrong name: %s", got.DisplayName)
 	}
@@ -115,14 +121,17 @@ func TestMemory_FamilyGroupCRUD(t *testing.T) {
 		t.Fatalf("DeleteFamilyGroup: %v", err)
 	}
 
-	_, err := s.GetFamilyGroup(ctx, "fg1")
-	if err == nil {
-		t.Error("expected error for deleted group")
+	_, found, err := s.GetFamilyGroup(ctx, "fg1")
+	if err != nil {
+		t.Fatalf("GetFamilyGroup after delete: %v", err)
+	}
+	if found {
+		t.Error("expected family group not found after delete")
 	}
 }
 
 func TestMemory_RiskAlerts(t *testing.T) {
-	s := NewMemory()
+	s := NewMemory(0)
 	ctx := context.Background()
 
 	alert := models.RiskAlert{
@@ -134,7 +143,10 @@ func TestMemory_RiskAlerts(t *testing.T) {
 		t.Fatalf("CreateRiskAlert: %v", err)
 	}
 
-	alerts, _ := s.ListRiskAlerts(ctx, models.AlertFilter{Limit: 10})
+	alerts, _, err := s.ListRiskAlerts(ctx, models.AlertFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRiskAlerts: %v", err)
+	}
 	if len(alerts) != 1 {
 		t.Errorf("expected 1 alert, got %d", len(alerts))
 	}
@@ -143,14 +155,17 @@ func TestMemory_RiskAlerts(t *testing.T) {
 		t.Fatalf("UpdateRiskAlertStatus: %v", err)
 	}
 
-	filtered, _ := s.ListRiskAlerts(ctx, models.AlertFilter{Status: "resolved", Limit: 10})
+	filtered, _, err := s.ListRiskAlerts(ctx, models.AlertFilter{Status: "resolved", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRiskAlerts: %v", err)
+	}
 	if len(filtered) != 1 {
 		t.Errorf("expected 1 resolved, got %d", len(filtered))
 	}
 }
 
 func TestMemory_DashboardStats(t *testing.T) {
-	s := NewMemory()
+	s := NewMemory(0)
 	ctx := context.Background()
 
 	s.UpsertAgent(ctx, models.Agent{

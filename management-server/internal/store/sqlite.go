@@ -102,6 +102,7 @@ func (s *SQLiteStore) GetFamilyGroup(_ context.Context, id string) (models.Famil
 	err := s.db.QueryRow(`SELECT id, display_name, COALESCE(member_principal_ids,'[]'), labels, created_at, updated_at FROM family_groups WHERE id=?`, id).
 		Scan(&fg.ID, &fg.DisplayName, &members, &labels, &ca, &ua)
 	if errors.Is(err, sql.ErrNoRows) {
+		debugLog("GetFamilyGroup not found", "id", id, "store", "sqlite")
 		return fg, false, nil
 	}
 	if err != nil {
@@ -383,8 +384,11 @@ func (s *SQLiteStore) CreatePolicyBundle(_ context.Context, pb models.PolicyBund
 	if pt == "" {
 		pt = "opa_rego"
 	}
-	_, err := s.db.Exec(`INSERT INTO policy_bundles (version, policy_type, payload, digest, active, metadata_json, created_at) VALUES (?,?,?,?,0,?,?)`,
-		pb.Version, pt, pb.Payload, pb.Digest, metadataJSON, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err := s.db.Exec(`INSERT INTO policy_bundles (version, policy_type, payload, digest, active, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)`,
+		pb.Version, pt, pb.Payload, pb.Digest, pb.Active, metadataJSON, time.Now().UTC().Format(time.RFC3339Nano))
+	if err == nil {
+		debugLog("CreatePolicyBundle", "version", pb.Version, "active", pb.Active, "store", "sqlite")
+	}
 	return err
 }
 
@@ -394,6 +398,7 @@ func (s *SQLiteStore) GetActivePolicyBundle(_ context.Context) (models.PolicyBun
 	err := s.db.QueryRow(`SELECT version, policy_type, payload, digest, active, COALESCE(metadata_json,'{}'), created_at FROM policy_bundles WHERE active=1 ORDER BY created_at DESC LIMIT 1`).
 		Scan(&pb.Version, &pb.PolicyType, &pb.Payload, &pb.Digest, &pb.Active, &metaStr, &ca)
 	if errors.Is(err, sql.ErrNoRows) {
+		debugLog("GetActivePolicyBundle: no active bundle found", "store", "sqlite")
 		return pb, false, nil
 	}
 	if err != nil {

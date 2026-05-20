@@ -123,7 +123,7 @@ mod tests {
         let event = ProbeEvent::default();
         let r = resource_ref_from_event(&event);
         // Default syscall bytes are all zeros => empty string after trim
-        assert!(!r.is_empty());
+        assert!(r.is_empty());
     }
 
     #[test]

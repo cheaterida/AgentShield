@@ -5,6 +5,7 @@ import type { PolicyBundle } from '../api/types';
 export function PoliciesPage() {
   const [bundles, setBundles] = useState<PolicyBundle[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ version: '', payload: '', digest: '' });
 
@@ -12,8 +13,9 @@ export function PoliciesPage() {
     try {
       const data = await api.listPolicyBundles();
       setBundles(data.bundles);
+      setError(null);
     } catch (e) {
-      console.error(e);
+      setError(e instanceof Error ? e.message : '加载策略包列表失败');
     } finally {
       setLoading(false);
     }
@@ -30,6 +32,15 @@ export function PoliciesPage() {
       });
       setShowForm(false);
       setForm({ version: '', payload: '', digest: '' });
+      fetchBundles();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleActivate = async (version: string) => {
+    try {
+      await api.activatePolicyBundle(version);
       fetchBundles();
     } catch (e) {
       console.error(e);
@@ -60,7 +71,13 @@ export function PoliciesPage() {
         </div>
       )}
 
-      {loading ? (
+      {error ? (
+        <div style={{ padding: 40, textAlign: 'center', background: '#fef2f2', borderRadius: 8, color: '#dc2626' }}>
+          <p style={{ fontWeight: 600, marginBottom: 8 }}>加载失败</p>
+          <p style={{ fontSize: 13 }}>{error}</p>
+          <button onClick={fetchBundles} style={{ marginTop: 12, padding: '8px 16px', borderRadius: 8, border: '1px solid #fecaca', background: '#fff', color: '#dc2626', cursor: 'pointer', fontSize: 13 }}>重试</button>
+        </div>
+      ) : loading ? (
         <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>加载中...</div>
       ) : (
         <div style={{ background: '#fff', borderRadius: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.06)', overflow: 'hidden' }}>
@@ -71,11 +88,12 @@ export function PoliciesPage() {
                 <th style={{ textAlign: 'left', padding: '12px 16px', color: '#64748b', fontWeight: 600 }}>摘要</th>
                 <th style={{ textAlign: 'left', padding: '12px 16px', color: '#64748b', fontWeight: 600 }}>状态</th>
                 <th style={{ textAlign: 'left', padding: '12px 16px', color: '#64748b', fontWeight: 600 }}>创建时间</th>
+                <th style={{ textAlign: 'left', padding: '12px 16px', color: '#64748b', fontWeight: 600 }}>操作</th>
               </tr>
             </thead>
             <tbody>
               {bundles.length === 0 ? (
-                <tr><td colSpan={4} style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>暂无策略包</td></tr>
+                <tr><td colSpan={5} style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>暂无策略包</td></tr>
               ) : (
                 bundles.map((b) => (
                   <tr key={b.version} style={{ borderBottom: '1px solid #f1f5f9' }}>
@@ -87,6 +105,13 @@ export function PoliciesPage() {
                       </span>
                     </td>
                     <td style={{ padding: '12px 16px', fontSize: 12, color: '#94a3b8' }}>{new Date(b.created_at).toLocaleString()}</td>
+                    <td style={{ padding: '12px 16px' }}>
+                      {!b.active && (
+                        <button onClick={() => handleActivate(b.version)} style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid #6366f1', background: '#fff', color: '#6366f1', fontSize: 12, fontWeight: 500, cursor: 'pointer' }}>
+                          激活
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))
               )}

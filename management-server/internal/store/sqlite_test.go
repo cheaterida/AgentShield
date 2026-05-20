@@ -31,7 +31,7 @@ func TestSQLite_UpsertAndGetAgent(t *testing.T) {
 		t.Fatalf("UpsertAgent: %v", err)
 	}
 
-	got, err := s.GetAgent(ctx, "a1")
+	got, _, err := s.GetAgent(ctx, "a1")
 	if err != nil {
 		t.Fatalf("GetAgent: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestSQLite_UpdateAgentStatus(t *testing.T) {
 		t.Fatalf("UpdateAgentStatus: %v", err)
 	}
 
-	got, _ := s.GetAgent(ctx, "a1")
+	got, _, _ := s.GetAgent(ctx, "a1")
 	if got.Status != "degraded" {
 		t.Errorf("expected degraded, got %s", got.Status)
 	}
@@ -101,7 +101,7 @@ func TestSQLite_UpdateAgentHeartbeat(t *testing.T) {
 		t.Fatalf("UpdateAgentHeartbeat: %v", err)
 	}
 
-	got, _ := s.GetAgent(ctx, "a1")
+	got, _, _ := s.GetAgent(ctx, "a1")
 	if got.Status != "online" {
 		t.Errorf("expected online after heartbeat, got %s", got.Status)
 	}
@@ -124,7 +124,7 @@ func TestSQLite_FamilyGroupCRUD(t *testing.T) {
 		t.Fatalf("CreateFamilyGroup: %v", err)
 	}
 
-	got, err := s.GetFamilyGroup(ctx, "fg1")
+	got, _, err := s.GetFamilyGroup(ctx, "fg1")
 	if err != nil {
 		t.Fatalf("GetFamilyGroup: %v", err)
 	}
@@ -150,9 +150,12 @@ func TestSQLite_FamilyGroupCRUD(t *testing.T) {
 		t.Fatalf("DeleteFamilyGroup: %v", err)
 	}
 
-	_, err = s.GetFamilyGroup(ctx, "fg1")
-	if err == nil {
-		t.Error("expected error after delete")
+	_, found, err := s.GetFamilyGroup(ctx, "fg1")
+	if err != nil {
+		t.Fatalf("GetFamilyGroup after delete: %v", err)
+	}
+	if found {
+		t.Error("expected family group not found after delete")
 	}
 }
 
@@ -182,7 +185,7 @@ func TestSQLite_AuditEvents(t *testing.T) {
 		t.Errorf("expected 2 events, got %d", len(all))
 	}
 
-	filtered, err := s.ListAuditEventsFiltered(ctx, models.AuditEventFilter{
+	filtered, _, err := s.ListAuditEventsFiltered(ctx, models.AuditEventFilter{
 		AgentID: "a1", Action: "write", Limit: 10,
 	})
 	if err != nil {
@@ -208,7 +211,7 @@ func TestSQLite_RiskAlerts(t *testing.T) {
 		t.Fatalf("CreateRiskAlert: %v", err)
 	}
 
-	alerts, err := s.ListRiskAlerts(ctx, models.AlertFilter{Limit: 10})
+	alerts, _, err := s.ListRiskAlerts(ctx, models.AlertFilter{Limit: 10})
 	if err != nil {
 		t.Fatalf("ListRiskAlerts: %v", err)
 	}
@@ -220,7 +223,10 @@ func TestSQLite_RiskAlerts(t *testing.T) {
 		t.Fatalf("UpdateRiskAlertStatus: %v", err)
 	}
 
-	filtered, _ := s.ListRiskAlerts(ctx, models.AlertFilter{Status: "open", Limit: 10})
+	filtered, _, err := s.ListRiskAlerts(ctx, models.AlertFilter{Status: "open", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRiskAlerts: %v", err)
+	}
 	if len(filtered) != 0 {
 		t.Errorf("expected 0 open alerts after ack, got %d", len(filtered))
 	}
@@ -241,7 +247,7 @@ func TestSQLite_PolicyBundles(t *testing.T) {
 		t.Fatalf("CreatePolicyBundle: %v", err)
 	}
 
-	active, err := s.GetActivePolicyBundle(ctx)
+	active, _, err := s.GetActivePolicyBundle(ctx)
 	if err != nil {
 		t.Fatalf("GetActivePolicyBundle: %v", err)
 	}

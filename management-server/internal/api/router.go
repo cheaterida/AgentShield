@@ -28,6 +28,7 @@ func NewRouter(log *slog.Logger, s store.Store, re *risk.Engine, h *Hub, p *poli
 	r := &Router{log: log, store: s, risk: re, hub: h, pol: p, opaClient: opa}
 	m := http.NewServeMux()
 	m.HandleFunc("GET /healthz", r.healthz)
+	m.HandleFunc("GET /api/v1/healthz", r.healthz)
 
 	// Agents
 	m.HandleFunc("POST /api/v1/agents/register", r.registerAgent)
@@ -438,6 +439,7 @@ func (s SpanIngest) toAuditEvent(agentID, familyGroupID string) models.AuditEven
 		Attributes:    attrs,
 	}
 }
+
 
 // ── Policies ──
 

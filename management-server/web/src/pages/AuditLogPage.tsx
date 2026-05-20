@@ -4,7 +4,7 @@ import { useAuditEvents } from '../hooks/useAuditEvents';
 
 export function AuditLogPage() {
   const [params, setParams] = useState('limit=50');
-  const { events, total, loading, refresh } = useAuditEvents(params);
+  const { events, total, loading, error, refresh } = useAuditEvents(params);
   const [action, setAction] = useState('');
   const [agentId, setAgentId] = useState('');
 
@@ -49,7 +49,13 @@ export function AuditLogPage() {
         </button>
       </div>
 
-      {loading ? (
+      {error ? (
+        <div style={{ padding: 40, textAlign: 'center', background: '#fef2f2', borderRadius: 8, color: '#dc2626' }}>
+          <p style={{ fontWeight: 600, marginBottom: 8 }}>加载失败</p>
+          <p style={{ fontSize: 13 }}>{error}</p>
+          <button onClick={refresh} style={{ marginTop: 12, padding: '8px 16px', borderRadius: 8, border: '1px solid #fecaca', background: '#fff', color: '#dc2626', cursor: 'pointer', fontSize: 13 }}>重试</button>
+        </div>
+      ) : loading ? (
         <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>加载中...</div>
       ) : (
         <div style={{ background: '#fff', borderRadius: 12, boxShadow: '0 1px 3px rgba(0,0,0,0.06)', overflow: 'hidden' }}>
@@ -74,7 +80,7 @@ export function AuditLogPage() {
                     <td style={{ padding: '10px 16px', color: '#6366f1' }}>{ev.agent_id}</td>
                     <td style={{ padding: '10px 16px', fontWeight: 500 }}>{ev.action}</td>
                     <td style={{ padding: '10px 16px', color: '#475569', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ev.resource_ref}</td>
-                    <td style={{ padding: '10px 16px' }}>{ev.risk_contribution.toFixed(2)}</td>
+                    <td style={{ padding: '10px 16px' }}>{(ev.risk_contribution ?? 0).toFixed(2)}</td>
                   </tr>
                 ))
               )}

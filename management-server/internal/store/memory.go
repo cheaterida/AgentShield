@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -12,6 +13,21 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+
+// DebugLog is an optional package-level logger for debug tracing store operations.
+// Set via SetLogger; when nil (default), debug logging is skipped entirely.
+var DebugLog *slog.Logger
+
+// SetLogger configures the package-level debug logger for store operations.
+func SetLogger(l *slog.Logger) {
+	DebugLog = l
+}
+
+func debugLog(msg string, args ...any) {
+	if DebugLog != nil {
+		DebugLog.Debug(msg, args...)
+	}
+}
 
 type Memory struct {
 	mu           sync.RWMutex
@@ -53,6 +69,9 @@ func (m *Memory) GetFamilyGroup(_ context.Context, id string) (models.FamilyGrou
 	m.mu.RLock()
 	fg, ok := m.familyGroups[id]
 	m.mu.RUnlock()
+	if !ok {
+		debugLog("GetFamilyGroup not found", "id", id, "store", "memory")
+	}
 	return fg, ok, nil
 }
 
@@ -305,6 +324,7 @@ func (m *Memory) GetActivePolicyBundle(_ context.Context) (models.PolicyBundle, 
 			return m.policies[i], true, nil
 		}
 	}
+	debugLog("GetActivePolicyBundle: no active bundle found", "store", "memory")
 	return models.PolicyBundle{}, false, nil
 }
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Bot, Activity, AlertTriangle, BarChart3, Wifi } from 'lucide-react';
+import { Bot, AlertTriangle, BarChart3, Wifi } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { api } from '../api/client';
 import type { DashboardStats } from '../api/types';
@@ -18,26 +18,38 @@ const cardStyle: React.CSSProperties = {
 
 export function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const wsEvent = useWebSocket('audit_event');
 
-  const fetchStats = useCallback(async () => {
+  const fetchStats = useCallback(async (silent?: boolean) => {
     try {
       setStats(await api.getDashboardStats());
+      setError(null);
     } catch (e) {
-      console.error(e);
+      if (!silent) setError(e instanceof Error ? e.message : '加载仪表盘数据失败');
     }
   }, []);
 
   useEffect(() => {
     fetchStats();
-    const t = setInterval(fetchStats, 10000);
+    const t = setInterval(() => fetchStats(true), 10000);
     return () => clearInterval(t);
   }, [fetchStats]);
 
   // Refresh on WS event
   useEffect(() => {
-    if (wsEvent) fetchStats();
+    if (wsEvent) fetchStats(true);
   }, [wsEvent, fetchStats]);
+
+  if (error) {
+    return (
+      <div style={{ padding: 40, textAlign: 'center', background: '#fef2f2', borderRadius: 8, color: '#dc2626' }}>
+        <p style={{ fontWeight: 600, marginBottom: 8 }}>加载失败</p>
+        <p style={{ fontSize: 13 }}>{error}</p>
+        <button onClick={() => fetchStats()} style={{ marginTop: 12, padding: '8px 16px', borderRadius: 8, border: '1px solid #fecaca', background: '#fff', color: '#dc2626', cursor: 'pointer', fontSize: 13 }}>重试</button>
+      </div>
+    );
+  }
 
   if (!stats) {
     return <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>加载中...</div>;

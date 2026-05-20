@@ -1,4 +1,4 @@
-// Package main：AgentShield 监管中心 HTTP + gRPC API。
+// Package main：AgentShield 监管中心 HTTP API。
 //
 // 六大模块落地：
 //   1 智能体资产管理 — POST /api/v1/agents/register、GET /api/v1/agents 等
@@ -7,6 +7,8 @@
 //   4 柔性防御执行 — 通过 heartbeat response 下发处置指令
 //   5 权限资源管控 — policy.OPAClient 对接 OPA 策略评估
 //   6 内核底座安全 — 见 kernel-hardening、ebpf-probes
+//
+// gRPC 已移除 (2026-05-20) — proto 定义保留在 shared/proto/ 作为契约参考。
 package main
 
 import (
@@ -21,7 +23,6 @@ import (
 
 	"agentshield.dev/agentshield/management-server/internal/api"
 	"agentshield.dev/agentshield/management-server/internal/config"
-	"agentshield.dev/agentshield/management-server/internal/grpc"
 	"agentshield.dev/agentshield/management-server/internal/policy"
 	"agentshield.dev/agentshield/management-server/internal/risk"
 	"agentshield.dev/agentshield/management-server/internal/store"
@@ -36,6 +37,9 @@ func main() {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
+
+	// Wire debug logger into store package for trace-level diagnostics.
+	store.SetLogger(logger)
 
 	// ── 初始化存储 ──
 	var st store.Store
@@ -91,14 +95,6 @@ func main() {
 		}
 	}()
 
-	// ── gRPC Server ──
-	grpcSrv := grpc.New(logger, st, riskEngine, polDist)
-	go func() {
-		if err := grpcSrv.Start(cfg); err != nil {
-			logger.Error("grpc server exit", "err", err)
-		}
-	}()
-
 	// ── 优雅关闭 ──
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	<-ctx.Done()
@@ -111,7 +107,6 @@ func main() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown", "err", err)
 	}
-	grpcSrv.GracefulStop()
 	logger.Info("management-server stopped")
 }
 

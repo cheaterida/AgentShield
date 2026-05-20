@@ -17,8 +17,30 @@ export interface AuditEvent {
   agent_id: string;
   resource_ref: string;
   action: string;
-  attributes: Record<string, string>;
+  attributes: AuditEventAttributes;
   risk_contribution: number;
+}
+
+export interface AuditEventAttributes {
+  // eBPF probe
+  comm?: string;
+  pid?: string;
+  uid?: string;
+  network_dst?: string;
+  socket_create?: string;
+  // OPA injected (Go backend)
+  opa_allow?: string;
+  opa_risk_level?: string;
+  opa_deny_sensitive_path?: string;
+  opa_deny_network?: string;
+  opa_risky_write?: string;
+  opa_matched_path?: string;
+  // Span / trace linkage
+  span_id?: string;
+  trace_id?: string;
+  duration?: string;
+  // Open-ended passthrough
+  [key: string]: string | undefined;
 }
 
 export interface RiskAlert {
@@ -53,6 +75,53 @@ export interface FamilyGroup {
   created_at: string;
   updated_at: string;
 }
+
+
+export interface SpanEvent {
+  name: string;
+  attributes: Record<string, string>;
+}
+
+export interface TraceSpan {
+  trace_id: string;
+  span_id: string;
+  parent_id: string;
+  name: string;
+  kind: number;
+  start_time: string;
+  end_time: string;
+  duration: number;
+  status_code: number;
+  attributes: Record<string, string>;
+  events: SpanEvent[];
+  agent_id: string;
+  family_group_id: string;
+}
+
+export interface TraceGroup {
+  trace_id: string;
+  span_count: number;
+  earliest: string;
+  latest: string;
+  spans: TraceSpan[];
+}
+
+export interface AgentInfo {
+  id: string;
+  name?: string;
+  display_name?: string;
+  hostname?: string;
+  status: string;
+}
+
+export interface FamilyGroupWithAgents {
+  id: string;
+  name: string;
+  display_name?: string;
+  agent_count: number;
+  agents: AgentInfo[];
+}
+
 
 export interface PolicyBundle {
   version: string;
