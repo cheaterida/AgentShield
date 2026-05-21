@@ -14,6 +14,17 @@ pub struct Config {
     pub policy_cache_dir: String,
     pub hermes_binary_path: Option<String>,
     pub probe_enabled: bool,
+    pub probe_comm_allowlist: Vec<String>,
+    #[cfg(feature = "checkpoint")]
+    pub checkpoint_enabled: bool,
+    #[cfg(feature = "checkpoint")]
+    pub checkpoint_dir: String,
+    #[cfg(feature = "checkpoint")]
+    pub checkpoint_max_count: usize,
+    #[cfg(feature = "checkpoint")]
+    pub workspace_dir: String,
+    #[cfg(feature = "checkpoint")]
+    pub checkpoint_interval_steps: u64,
 }
 
 impl Config {
@@ -39,6 +50,27 @@ impl Config {
             probe_enabled: getenv_opt("AGENTSHIELD_PROBE_ENABLED")
                 .map(|s| s == "true" || s == "1")
                 .unwrap_or(true),
+            probe_comm_allowlist: getenv_opt("AGENTSHIELD_PROBE_COMM_ALLOWLIST")
+                .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
+                .unwrap_or_default(),
+            #[cfg(feature = "checkpoint")]
+            checkpoint_enabled: getenv_opt("AGENTSHIELD_CHECKPOINT_ENABLED")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(true),
+            #[cfg(feature = "checkpoint")]
+            checkpoint_dir: getenv_opt("AGENTSHIELD_CHECKPOINT_DIR")
+                .unwrap_or_else(|| "/var/lib/agentshield/checkpoints".into()),
+            #[cfg(feature = "checkpoint")]
+            checkpoint_max_count: getenv_opt("AGENTSHIELD_CHECKPOINT_MAX_COUNT")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(50),
+            #[cfg(feature = "checkpoint")]
+            workspace_dir: getenv_opt("AGENTSHIELD_WORKSPACE_DIR")
+                .unwrap_or_else(|| "/workspace".into()),
+            #[cfg(feature = "checkpoint")]
+            checkpoint_interval_steps: getenv_opt("AGENTSHIELD_CHECKPOINT_INTERVAL_STEPS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1),
         })
     }
 }

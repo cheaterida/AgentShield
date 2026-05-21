@@ -129,3 +129,69 @@ export interface PolicyBundle {
   active: boolean;
   created_at: string;
 }
+
+// ── Token Quota ──
+
+export interface TokenQuota {
+  quota_id: string;
+  target_type: 'agent' | 'family_group';
+  target_id: string;
+  quota_name: string;
+  daily_limit: number;
+  weekly_limit: number;
+  monthly_limit: number;
+  total_limit: number;
+  per_request_limit: number;
+  max_concurrency: number;
+  warn_threshold: number;
+  block_threshold: number;
+  priority: number;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+  daily_used?: number;
+  monthly_used?: number;
+}
+
+export interface TokenUsageLog {
+  log_id: string;
+  agent_id: string;
+  family_group_id: string;
+  span_id: string;
+  trace_id: string;
+  model_name: string;
+  provider: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_millicents: number;
+  quota_status: 'ok' | 'warned' | 'blocked';
+  occurred_at: string;
+  created_at: string;
+}
+
+export interface TokenUsageSummary {
+  target_type: string;
+  target_id: string;
+  period: string;
+  date_key: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  request_count: number;
+  cost_millicents: number;
+  updated_at: string;
+}
+
+export interface ModelPrice {
+  model_id: string;
+  provider: string;
+  display_name: string;
+  input_price_millicents: number;
+  output_price_millicents: number;
+  cache_read_price_millicents: number;
+  active: boolean;
+  updated_at: string;
+}

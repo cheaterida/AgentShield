@@ -1,0 +1,19 @@
+# AgentShield Persistent Build Environment
+# Build once, reuse for all agent-runtime compilations.
+#
+# Build:   docker build -t agentshield/build:latest -f agent-runtime/Dockerfile.build .
+# The image pre-installs all toolchains, so builds are fast (no apt/rustup per run).
+
+FROM rust:1.91-bookworm
+
+RUN apt-get update -qq \
+    && apt-get install -y -qq musl-tools llvm-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# rust-src needed for eBPF -Z build-std=core (bpfel-unknown-none has no pre-built stdlib)
+# bpf-linker is the LLVM-based linker for eBPF bytecode
+RUN rustup component add rust-src --toolchain nightly \
+    && rustup target add x86_64-unknown-linux-musl \
+    && cargo +nightly install bpf-linker
+
+CMD ["sleep", "infinity"]

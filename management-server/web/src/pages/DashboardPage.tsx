@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Bot, AlertTriangle, BarChart3, Wifi } from 'lucide-react';
+import { Bot, AlertTriangle, BarChart3, Wifi, Coins, DollarSign } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { api } from '../api/client';
 import type { DashboardStats } from '../api/types';
@@ -18,12 +18,31 @@ const cardStyle: React.CSSProperties = {
 
 export function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [todayTokens, setTodayTokens] = useState<number>(0);
+  const [monthlyCost, setMonthlyCost] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
   const wsEvent = useWebSocket('audit_event');
 
   const fetchStats = useCallback(async (silent?: boolean) => {
     try {
-      setStats(await api.getDashboardStats());
+      const [ds, logsRes] = await Promise.all([
+        api.getDashboardStats(),
+        api.listUsageLogs('limit=100').catch(() => null),
+      ]);
+      setStats(ds);
+      if (logsRes) {
+        const today = new Date().toISOString().slice(0, 10);
+        let tokens = 0;
+        let cost = 0;
+        for (const log of logsRes.logs) {
+          cost += log.cost_millicents;
+          if (log.occurred_at.slice(0, 10) === today) {
+            tokens += log.total_tokens;
+          }
+        }
+        setTodayTokens(tokens);
+        setMonthlyCost(cost);
+      }
       setError(null);
     } catch (e) {
       if (!silent) setError(e instanceof Error ? e.message : '加载仪表盘数据失败');
@@ -83,21 +102,33 @@ export function DashboardPage() {
           <BarChart3 size={32} color="#f59e0b" />
           <div><div style={{ fontSize: 28, fontWeight: 700 }}>{stats.event_rate_last_hour}</div><div style={{ color: '#64748b', fontSize: 13 }}>事件/分钟 (近1h)</div></div>
         </div>
+        <div style={cardStyle}>
+          <Coins size={32} color="#8b5cf6" />
+          <div><div style={{ fontSize: 28, fontWeight: 700 }}>{todayTokens.toLocaleString()}</div><div style={{ color: '#64748b', fontSize: 13 }}>今日 Token</div></div>
+        </div>
+        <div style={cardStyle}>
+          <DollarSign size={32} color="#059669" />
+          <div><div style={{ fontSize: 28, fontWeight: 700 }}>${(monthlyCost / 100000).toFixed(2)}</div><div style={{ color: '#64748b', fontSize: 13 }}>预估费用</div></div>
+        </div>
       </div>
 
       {/* Charts */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16, marginBottom: 24 }}>
         <div style={{ ...cardStyle, flexDirection: 'column', alignItems: 'stretch' }}>
           <div style={{ fontWeight: 600, marginBottom: 12, color: '#334155' }}>事件速率趋势</div>
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={[{ time: '1h前', events: Math.round(stats.event_rate_last_hour * 0.8) }, { time: '30min前', events: Math.round(stats.event_rate_last_hour * 0.9) }, { time: '现在', events: stats.event_rate_last_hour }]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis dataKey="time" fontSize={12} />
-              <YAxis fontSize={12} />
-              <Tooltip />
-              <Area type="monotone" dataKey="events" stroke="#6366f1" fill="#6366f120" />
-            </AreaChart>
-          </ResponsiveContainer>
+          {stats.event_rate_last_hour > 0 ? (
+            <ResponsiveContainer width="100%" height={200}>
+              <AreaChart data={[{ time: '现在', events: stats.event_rate_last_hour }]}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <XAxis dataKey="time" fontSize={12} />
+                <YAxis fontSize={12} />
+                <Tooltip />
+                <Area type="monotone" dataKey="events" stroke="#6366f1" fill="#6366f120" />
+              </AreaChart>
+            </ResponsiveContainer>
+          ) : (
+            <div style={{ color: '#94a3b8', fontSize: 14, padding: 40, textAlign: 'center' }}>暂无事件速率数据</div>
+          )}
         </div>
         <div style={{ ...cardStyle, flexDirection: 'column', alignItems: 'stretch' }}>
           <div style={{ fontWeight: 600, marginBottom: 12, color: '#334155' }}>状态分布</div>

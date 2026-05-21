@@ -10,6 +10,9 @@ mod probe_event_conv;
 mod probe_manager;
 mod supervisor;
 
+#[cfg(feature = "checkpoint")]
+mod checkpoint;
+
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
@@ -132,7 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_buffer = Arc::new(event_buffer::EventBuffer::new(10_000));
 
     // ── 3. eBPF 探针管理 ──
-    let probe_manager = Arc::new(probe_manager::ProbeManager::new(&cfg.agent_id, &cfg.family_group_id));
+    let probe_manager = Arc::new(probe_manager::ProbeManager::new(&cfg.agent_id, &cfg.family_group_id, cfg.probe_comm_allowlist.clone()));
     if cfg.probe_enabled {
         if let Err(e) = probe_manager.load_probes() {
             tracing::warn!(error = %e, "probe load failed (non-fatal)");
@@ -150,22 +153,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // ── 5. 心跳任务 ──
+    // ── 5. 心跳任务（延后创建以集成 checkpoint） ──
     let policy_cache = Arc::new(policy_cache::PolicyCache::new(&cfg.policy_cache_dir));
     tracing::info!(
         policy_dir = %cfg.policy_cache_dir,
         version = policy_cache.current_version(),
         "policy cache ready"
     );
-
-    let hb_task = heartbeat::HeartbeatTask::new(
-        client.clone(),
-        cfg.heartbeat_interval_secs,
-        probe_manager.clone(),
-        event_buffer.clone(),
-        policy_cache.clone(),
-    );
-    let hb_handle = tokio::spawn(hb_task.run());
 
     // ── 6. 事件上传任务 ──
     let upload_task = event_upload::EventUploadTask::new(
@@ -176,13 +170,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let upload_handle = tokio::spawn(upload_task.run(cfg.event_upload_interval_secs));
 
     // ── 7. Hermes Agent 监管（可选） ──
-    let supervisor = supervisor::Supervisor::new();
+    let supervisor = Arc::new(supervisor::Supervisor::new());
     if let Some(ref hermes_path) = cfg.hermes_binary_path {
         match supervisor.start(hermes_path) {
             Ok(()) => tracing::info!("hermes agent supervised"),
             Err(e) => tracing::warn!(error = %e, "hermes start failed"),
         }
     }
+
+    // ── 7b. Checkpoint 快照管理（可选，需 checkpoint feature） ──
+    #[cfg(feature = "checkpoint")]
+    let checkpoint_mgr = {
+        if cfg.checkpoint_enabled {
+            let cm_config = checkpoint::CheckpointConfig {
+                enabled: cfg.checkpoint_enabled,
+                checkpoint_dir: cfg.checkpoint_dir.clone().into(),
+                max_count: cfg.checkpoint_max_count,
+                workspace_dir: cfg.workspace_dir.clone().into(),
+                interval_steps: cfg.checkpoint_interval_steps,
+            };
+            match checkpoint::CheckpointManager::new(cm_config) {
+                Ok(mgr) => {
+                    let mgr = Arc::new(mgr);
+                    // 启动工作区文件追踪
+                    let tracker = mgr.tracker.clone();
+                    tokio::spawn(async move {
+                        tracker.start_watching().await.unwrap();
+                    });
+                    tracing::info!(
+                        checkpoint_dir = %cfg.checkpoint_dir,
+                        workspace_dir = %cfg.workspace_dir,
+                        max_count = cfg.checkpoint_max_count,
+                        "checkpoint manager initialized"
+                    );
+                    Some(mgr)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "checkpoint manager init failed, continuing without checkpoint");
+                    None
+                }
+            }
+        } else {
+            tracing::info!("checkpoint disabled by config");
+            None
+        }
+    };
+
+    // ── 5b. 心跳任务（含 checkpoint 集成） ──
+    let mut hb_task = heartbeat::HeartbeatTask::new(
+        client.clone(),
+        cfg.heartbeat_interval_secs,
+        probe_manager.clone(),
+        event_buffer.clone(),
+        policy_cache.clone(),
+    );
+    #[cfg(feature = "checkpoint")]
+    {
+        if let Some(ref cm) = checkpoint_mgr {
+            hb_task = hb_task.with_checkpoint_manager(cm.clone());
+        }
+        hb_task = hb_task.with_supervisor(supervisor.clone());
+    }
+    let hb_handle = tokio::spawn(hb_task.run());
 
     tracing::info!("agent-runtime running — press Ctrl+C to stop");
 

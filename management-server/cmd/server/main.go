@@ -22,10 +22,12 @@ import (
 	"time"
 
 	"agentshield.dev/agentshield/management-server/internal/api"
+	"agentshield.dev/agentshield/management-server/internal/cache"
 	"agentshield.dev/agentshield/management-server/internal/config"
 	"agentshield.dev/agentshield/management-server/internal/policy"
 	"agentshield.dev/agentshield/management-server/internal/risk"
 	"agentshield.dev/agentshield/management-server/internal/store"
+	"agentshield.dev/agentshield/management-server/internal/token_quota"
 )
 
 func main() {
@@ -57,6 +59,20 @@ func main() {
 		logger.Info("memory store ready", "cap", cfg.AuditBufferCap)
 	}
 
+	// ── Redis 缓存层 (Track D1) ──
+	var c cache.Cache
+	if cfg.RedisAddr != "" {
+		redisClient, err := cache.NewRedisClient(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+		if err != nil {
+			logger.Warn("redis unavailable, cache disabled", "addr", cfg.RedisAddr, "err", err)
+		} else {
+			c = redisClient
+			logger.Info("redis cache ready", "addr", cfg.RedisAddr, "db", cfg.RedisDB, "ttl", cfg.CacheTTL)
+		}
+	} else {
+		logger.Info("cache disabled (AGENTSHIELD_REDIS_ADDR not set)")
+	}
+
 	// ── 初始化组件 ──
 	riskEngine := risk.NewEngine(st, logger)
 
@@ -76,11 +92,33 @@ func main() {
 	opaClient := policy.NewOPAClient(cfg.OPABaseURL)
 	logger.Info("opa client ready", "base_url", cfg.OPABaseURL)
 
+	// ── Token 算力配额管理（可选）──
+	var quotaMgr *token_quota.Manager
+	if cfg.TokenQuotaEnabled {
+		quotaMgr = token_quota.New(st, logger)
+		logger.Info("token quota manager enabled",
+			"default_daily", cfg.TokenQuotaDefaultDaily,
+			"default_monthly", cfg.TokenQuotaDefaultMonthly)
+	} else {
+		logger.Info("token quota manager disabled (AGENTSHIELD_TOKEN_QUOTA_ENABLED=false)")
+	}
+
 	// ── HTTP API ──
-	apiHandler := api.NewRouter(logger, st, riskEngine, wsHub, polDist, opaClient)
+	apiHandler := api.NewRouter(logger, st, riskEngine, wsHub, polDist, opaClient, quotaMgr)
+
+	handler := apiHandler
+	if c != nil {
+		mux := http.NewServeMux()
+		mux.Handle("/", apiHandler)
+		if rc, ok := c.(*cache.RedisClient); ok {
+			mux.Handle("GET /debug/metrics", rc.MetricsHandler())
+		}
+		handler = mux
+	}
+
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           withLogging(logger, withCORS(apiHandler)),
+		Handler:           withLogging(logger, withCORS(handler)),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -95,6 +133,26 @@ func main() {
 		}
 	}()
 
+	// Agent offline detection — scan every 30s, mark agents with no heartbeat for 30s as offline.
+	offlineCancel := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				n, err := st.MarkStaleAgentsOffline(context.Background(), 30*time.Second)
+				if err != nil {
+					logger.Warn("offline detection scan failed", "err", err)
+				} else if n > 0 {
+					logger.Info("marked stale agents as offline", "count", n)
+				}
+			case <-offlineCancel:
+				return
+			}
+		}
+	}()
+
 	// ── 优雅关闭 ──
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	<-ctx.Done()
@@ -106,6 +164,14 @@ func main() {
 
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown", "err", err)
+	}
+	close(offlineCancel)
+	if c != nil {
+		if rc, ok := c.(*cache.RedisClient); ok {
+			if err := rc.Close(); err != nil {
+				logger.Error("redis close", "err", err)
+			}
+		}
 	}
 	logger.Info("management-server stopped")
 }

@@ -13,6 +13,7 @@ import (
 	"agentshield.dev/agentshield/management-server/internal/policy"
 	"agentshield.dev/agentshield/management-server/internal/risk"
 	"agentshield.dev/agentshield/management-server/internal/store"
+	"agentshield.dev/agentshield/management-server/internal/token_quota"
 )
 
 type Router struct {
@@ -22,10 +23,11 @@ type Router struct {
 	hub       *Hub
 	pol       *policy.Distributor
 	opaClient *policy.OPAClient
+	quota     *token_quota.Manager
 }
 
-func NewRouter(log *slog.Logger, s store.Store, re *risk.Engine, h *Hub, p *policy.Distributor, opa *policy.OPAClient) http.Handler {
-	r := &Router{log: log, store: s, risk: re, hub: h, pol: p, opaClient: opa}
+func NewRouter(log *slog.Logger, s store.Store, re *risk.Engine, h *Hub, p *policy.Distributor, opa *policy.OPAClient, qm *token_quota.Manager) http.Handler {
+	r := &Router{log: log, store: s, risk: re, hub: h, pol: p, opaClient: opa, quota: qm}
 	m := http.NewServeMux()
 	m.HandleFunc("GET /healthz", r.healthz)
 	m.HandleFunc("GET /api/v1/healthz", r.healthz)
@@ -63,6 +65,20 @@ func NewRouter(log *slog.Logger, s store.Store, re *risk.Engine, h *Hub, p *poli
 
 	// WebSocket
 	m.HandleFunc("GET /api/v1/ws/events", r.hub.ServeHTTP)
+
+	// Token Quota
+	if r.quota != nil {
+		m.HandleFunc("GET /api/v1/quota/agents/{id}/usage", r.quota.HandleAgentUsage)
+		m.HandleFunc("GET /api/v1/quota/family-groups/{id}/usage", r.quota.HandleFamilyGroupUsage)
+		m.HandleFunc("GET /api/v1/quota/usage/summary", r.quota.HandleUsageSummary)
+		m.HandleFunc("GET /api/v1/quota/prices", r.quota.HandleListPrices)
+		m.HandleFunc("POST /api/v1/quota/prices", r.quota.HandleUpsertPrice)
+		m.HandleFunc("GET /api/v1/quota/quotas", r.quota.HandleListQuotas)
+		m.HandleFunc("POST /api/v1/quota/quotas", r.quota.HandleCreateQuota)
+		m.HandleFunc("PUT /api/v1/quota/quotas/{id}", r.quota.HandleUpdateQuota)
+		m.HandleFunc("DELETE /api/v1/quota/quotas/{id}", r.quota.HandleDeleteQuota)
+		m.HandleFunc("GET /api/v1/quota/logs", r.quota.HandleUsageLogs)
+	}
 
 	return m
 }
@@ -236,6 +252,15 @@ func (r *Router) agentHeartbeat(w http.ResponseWriter, req *http.Request) {
 		LatestPolicyVersion: r.pol.GetCurrentVersion(req.Context()),
 		SuggestedAction:     r.computeSuggestedAction(hb.AgentID),
 	}
+	if r.quota != nil {
+		status, used, limit := r.quota.CheckQuota(req.Context(), hb.AgentID)
+		resp.QuotaStatus = status
+		resp.TokenUsageToday = used
+		resp.TokenQuotaDaily = limit
+		if status == "blocked" || status == "exceeded" {
+			resp.SuggestedAction = "quota_exceeded"
+		}
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -360,6 +385,12 @@ func (r *Router) ingestSpans(w http.ResponseWriter, req *http.Request) {
 	var events []models.AuditEvent
 	for _, sp := range payload.Spans {
 		events = append(events, sp.toAuditEvent(agentID, familyGroupID))
+		// Token 配额记录
+		if r.quota != nil && len(sp.Attrs) > 0 {
+			if alert := r.quota.RecordUsage(req.Context(), agentID, familyGroupID, sp.Attrs); alert != nil {
+				r.log.Info("token quota alert", "agent_id", agentID, "severity", alert.Severity, "title", alert.Title)
+			}
+		}
 	}
 
 	if len(events) > 0 {

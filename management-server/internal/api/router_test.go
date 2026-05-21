@@ -12,7 +12,7 @@ import (
 
 func TestHealthzRouting(t *testing.T) {
 	r := NewRouter(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		store.NewMemory(0), nil, nil, nil, nil)
+		store.NewMemory(0), nil, nil, nil, nil, nil)
 
 	tests := []struct {
 		path string

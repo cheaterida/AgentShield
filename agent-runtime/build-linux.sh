@@ -1,48 +1,76 @@
 #!/usr/bin/env bash
-# Cross-compile agent-runtime for Linux (static musl binary).
+# Cross-compile agent-runtime for Linux (static musl binary + eBPF bytecode).
+#
+# Uses a persistent Docker container (agentshield-build) with all toolchains
+# pre-installed. First run builds the image (~5 min), subsequent runs skip that.
+#
 # Prerequisites: Docker Desktop running.
-# Output: agent-runtime/bin/agent-runtime (static x86_64 binary)
+# Output: agent-runtime/bin/agent-runtime (static-pie x86_64)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# Docker Desktop on Windows needs Windows-style paths
-WIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -W)"
+# Docker Desktop on Windows needs Windows-style paths for volume mounts
+WIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -W 2>/dev/null || echo "$REPO_ROOT")"
 
-echo "=== Building agent-runtime for linux/amd64 (musl) ==="
+IMAGE="agentshield/build:latest"
+CONTAINER="agentshield-build"
+CARGO_CACHE="agent-shield-cargo"
 
-docker run --rm \
-  -v "${WIN_ROOT}:/build" \
-  -v "agent-shield-cargo:/usr/local/cargo" \
-  --workdir //build \
-  rust:1.91-bookworm \
-  sh -c '
-    set -e
+echo "=== AgentShield build environment (persistent container) ==="
 
-    apt-get update -qq && apt-get install -y -qq musl-tools llvm-dev 2>&1 | tail -1
+# ── 1. Ensure the build image exists ──
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "--- Building persistent build image (one-time, ~3-5 min) ---"
+    docker build -t "$IMAGE" -f "$SCRIPT_DIR/Dockerfile.build" "$REPO_ROOT"
+    echo "--- Image ready: $IMAGE ---"
+else
+    echo "--- Build image already exists: $IMAGE ---"
+fi
 
-    # ── Build eBPF bytecode ──
-    echo "=== Building eBPF bytecode ==="
-    rustup component add rust-src --toolchain nightly 2>&1 | tail -1
-    cargo +nightly install bpf-linker 2>&1 | tail -1
-    cargo +nightly build -p agentshield-ebpf \
-      --target bpfel-unknown-none \
-      --release \
-      -Z build-std=core 2>&1
+# ── 2. Ensure the persistent container exists ──
+if ! docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+    echo "--- Creating persistent build container ---"
+    docker run -d --name "$CONTAINER" \
+        -v "${WIN_ROOT}://build" \
+        -v "${CARGO_CACHE}://usr/local/cargo" \
+        "$IMAGE"
+    echo "--- Container created: $CONTAINER ---"
+else
+    # Start if stopped
+    if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+        echo "--- Starting existing container ---"
+        docker start "$CONTAINER"
+    fi
+    echo "--- Container ready: $CONTAINER ---"
+fi
 
-    ls -lh /build/target/bpfel-unknown-none/release/agentshield-ebpf
+# ── 3. Build inside the persistent container ──
+echo ""
+echo "=== Compiling (eBPF bytecode + agent-runtime) ==="
 
-    # ── Build agent-runtime ──
-    echo "=== Building agent-runtime ==="
-    rustup target add x86_64-unknown-linux-musl 2>&1 | tail -1
-    cargo build -p agent-runtime \
-      --target x86_64-unknown-linux-musl \
-      --release 2>&1
+docker exec -i "$CONTAINER" sh -c '
+set -e
 
-    ls -lh /build/target/x86_64-unknown-linux-musl/release/agent-runtime
-  '
+# ── eBPF bytecode ──
+echo "--- Building eBPF bytecode ---"
+cargo +nightly build -p agentshield-ebpf \
+    --target bpfel-unknown-none \
+    --release \
+    -Z build-std=core
 
-# ── Copy binary to output path ──
+ls -lh /build/target/bpfel-unknown-none/release/agentshield-ebpf
+
+# ── agent-runtime (musl static) ──
+echo "--- Building agent-runtime (musl static) ---"
+cargo build -p agent-runtime \
+    --target x86_64-unknown-linux-musl \
+    --release
+
+ls -lh /build/target/x86_64-unknown-linux-musl/release/agent-runtime
+'
+
+# ── 4. Copy binary out ──
 OUT_DIR="$SCRIPT_DIR/bin"
 mkdir -p "$OUT_DIR"
 cp "$REPO_ROOT/target/x86_64-unknown-linux-musl/release/agent-runtime" "$OUT_DIR/agent-runtime"

@@ -45,7 +45,7 @@ func NewSQLite(dsn string) (*SQLiteStore, error) {
 func (s *SQLiteStore) Close() error { return s.db.Close() }
 
 func (s *SQLiteStore) runMigrations() error {
-	for _, name := range []string{"migrations/001_init.sql", "migrations/002_add_policy_metadata.sql"} {
+	for _, name := range []string{"migrations/001_init.sql", "migrations/002_add_policy_metadata.sql", "migrations/003_add_token_management.sql"} {
 		data, err := migrations.ReadFile(name)
 		if err != nil {
 			return err
@@ -264,6 +264,20 @@ func (s *SQLiteStore) UpdateAgentHeartbeat(_ context.Context, id string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.Exec(`UPDATE agents SET last_heartbeat_at=?, status='online', updated_at=? WHERE id=?`, now, now, id)
 	return err
+}
+
+func (s *SQLiteStore) MarkStaleAgentsOffline(_ context.Context, timeout time.Duration) (int, error) {
+	cutoff := time.Now().UTC().Add(-timeout).Format(time.RFC3339Nano)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.Exec(
+		`UPDATE agents SET status='offline', updated_at=? WHERE status='online' AND last_heartbeat_at IS NOT NULL AND last_heartbeat_at < ?`,
+		now, cutoff,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 func (s *SQLiteStore) UpdateAgentRiskScore(_ context.Context, id string, score float64) error {
@@ -568,6 +582,240 @@ func (s *SQLiteStore) GetDashboardStats(_ context.Context, familyGroupID string)
 		}
 	}
 	return ds, nil
+}
+
+// ── Token Quota ──
+
+func (s *SQLiteStore) CreateTokenQuota(_ context.Context, q models.TokenQuota) error {
+	if q.QuotaID == "" {
+		return errors.New("quota_id required")
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	active := 0
+	if q.Active {
+		active = 1
+	}
+	_, err := s.db.Exec(`INSERT INTO token_quotas (quota_id, target_type, target_id, quota_name, daily_limit, weekly_limit, monthly_limit, total_limit, per_request_limit, max_concurrency, warn_threshold, block_threshold, priority, active, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		q.QuotaID, q.TargetType, q.TargetID, q.QuotaName, q.DailyLimit, q.WeeklyLimit, q.MonthlyLimit, q.TotalLimit, q.PerRequestLimit, q.MaxConcurrency, q.WarnThreshold, q.BlockThreshold, q.Priority, active, now, now)
+	return err
+}
+
+func (s *SQLiteStore) GetTokenQuota(_ context.Context, targetType, targetID string) (models.TokenQuota, bool, error) {
+	var q models.TokenQuota
+	var active int
+	var ca, ua string
+	err := s.db.QueryRow(`SELECT quota_id, target_type, target_id, quota_name, daily_limit, weekly_limit, monthly_limit, total_limit, per_request_limit, max_concurrency, warn_threshold, block_threshold, priority, active, created_at, updated_at FROM token_quotas WHERE target_type=? AND target_id=? AND active=1`, targetType, targetID).
+		Scan(&q.QuotaID, &q.TargetType, &q.TargetID, &q.QuotaName, &q.DailyLimit, &q.WeeklyLimit, &q.MonthlyLimit, &q.TotalLimit, &q.PerRequestLimit, &q.MaxConcurrency, &q.WarnThreshold, &q.BlockThreshold, &q.Priority, &active, &ca, &ua)
+	if errors.Is(err, sql.ErrNoRows) {
+		return q, false, nil
+	}
+	if err != nil {
+		return q, false, err
+	}
+	q.Active = active == 1
+	q.CreatedAt = ca
+	q.UpdatedAt = ua
+	return q, true, nil
+}
+
+func (s *SQLiteStore) ListTokenQuotas(_ context.Context, targetType string) ([]models.TokenQuota, error) {
+	var rows *sql.Rows
+	var err error
+	if targetType != "" {
+		rows, err = s.db.Query(`SELECT quota_id, target_type, target_id, quota_name, daily_limit, weekly_limit, monthly_limit, total_limit, per_request_limit, max_concurrency, warn_threshold, block_threshold, priority, active, created_at, updated_at FROM token_quotas WHERE target_type=? ORDER BY created_at DESC`, targetType)
+	} else {
+		rows, err = s.db.Query(`SELECT quota_id, target_type, target_id, quota_name, daily_limit, weekly_limit, monthly_limit, total_limit, per_request_limit, max_concurrency, warn_threshold, block_threshold, priority, active, created_at, updated_at FROM token_quotas ORDER BY created_at DESC`)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTokenQuotas(rows)
+}
+
+func (s *SQLiteStore) UpdateTokenQuota(_ context.Context, q models.TokenQuota) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	active := 0
+	if q.Active {
+		active = 1
+	}
+	res, err := s.db.Exec(`UPDATE token_quotas SET target_type=?, target_id=?, quota_name=?, daily_limit=?, weekly_limit=?, monthly_limit=?, total_limit=?, per_request_limit=?, max_concurrency=?, warn_threshold=?, block_threshold=?, priority=?, active=?, updated_at=? WHERE quota_id=?`,
+		q.TargetType, q.TargetID, q.QuotaName, q.DailyLimit, q.WeeklyLimit, q.MonthlyLimit, q.TotalLimit, q.PerRequestLimit, q.MaxConcurrency, q.WarnThreshold, q.BlockThreshold, q.Priority, active, now, q.QuotaID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) DeleteTokenQuota(_ context.Context, quotaID string) error {
+	res, err := s.db.Exec(`DELETE FROM token_quotas WHERE quota_id=?`, quotaID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ── Token Usage Logs ──
+
+func (s *SQLiteStore) AppendTokenUsageLog(_ context.Context, l models.TokenUsageLog) error {
+	if l.LogID == "" {
+		return errors.New("log_id required")
+	}
+	_, err := s.db.Exec(`INSERT INTO token_usage_logs (log_id, agent_id, family_group_id, span_id, trace_id, model_name, provider, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, cost_millicents, quota_status, occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		l.LogID, l.AgentID, l.FamilyGroupID, l.SpanID, l.TraceID, l.ModelName, l.Provider, l.InputTokens, l.OutputTokens, l.TotalTokens, l.CacheReadTokens, l.CacheWriteTokens, l.CostMillicents, l.QuotaStatus, l.OccurredAt)
+	return err
+}
+
+func (s *SQLiteStore) GetTokenUsageLogs(_ context.Context, filter models.TokenUsageLogFilter) ([]models.TokenUsageLog, int, error) {
+	where := []string{"1=1"}
+	args := []any{}
+	if filter.AgentID != "" {
+		where = append(where, "agent_id=?")
+		args = append(args, filter.AgentID)
+	}
+	if filter.FamilyGroupID != "" {
+		where = append(where, "family_group_id=?")
+		args = append(args, filter.FamilyGroupID)
+	}
+	if filter.ModelName != "" {
+		where = append(where, "model_name=?")
+		args = append(args, filter.ModelName)
+	}
+	if filter.FromTime != "" {
+		where = append(where, "occurred_at>=?")
+		args = append(args, filter.FromTime)
+	}
+	if filter.ToTime != "" {
+		where = append(where, "occurred_at<?")
+		args = append(args, filter.ToTime)
+	}
+
+	var total int
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM token_usage_logs WHERE %s", strings.Join(where, " AND "))
+	if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	limit := filter.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	query := fmt.Sprintf("SELECT log_id, agent_id, family_group_id, span_id, COALESCE(trace_id,''), model_name, COALESCE(provider,''), input_tokens, output_tokens, total_tokens, COALESCE(cache_read_tokens,0), COALESCE(cache_write_tokens,0), cost_millicents, quota_status, occurred_at, COALESCE(created_at,'') FROM token_usage_logs WHERE %s ORDER BY occurred_at DESC LIMIT ? OFFSET ?", strings.Join(where, " AND "))
+	rows, err := s.db.Query(query, append(args, limit, offset)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	return scanTokenUsageLogs(rows, total)
+}
+
+// ── Token Usage Summary ──
+
+func (s *SQLiteStore) GetTokenUsageSummary(_ context.Context, targetType, targetID, period string) ([]models.TokenUsageSummary, error) {
+	rows, err := s.db.Query(`SELECT target_type, target_id, period, date_key, input_tokens, output_tokens, total_tokens, request_count, cost_millicents, updated_at FROM token_usage_summary WHERE target_type=? AND target_id=? AND period=? ORDER BY date_key DESC`, targetType, targetID, period)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.TokenUsageSummary
+	for rows.Next() {
+		var s models.TokenUsageSummary
+		var ua string
+		if err := rows.Scan(&s.TargetType, &s.TargetID, &s.Period, &s.DateKey, &s.InputTokens, &s.OutputTokens, &s.TotalTokens, &s.RequestCount, &s.CostMillicents, &ua); err != nil {
+			return out, err
+		}
+		s.UpdatedAt = ua
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) UpsertTokenUsageSummary(_ context.Context, summary models.TokenUsageSummary) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	summaryID := fmt.Sprintf("%s:%s:%s:%s", summary.TargetType, summary.TargetID, summary.Period, summary.DateKey)
+	_, err := s.db.Exec(`INSERT INTO token_usage_summary (summary_id, target_type, target_id, period, date_key, input_tokens, output_tokens, total_tokens, request_count, cost_millicents, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(summary_id) DO UPDATE SET input_tokens=input_tokens+?, output_tokens=output_tokens+?, total_tokens=total_tokens+?, request_count=request_count+?, cost_millicents=cost_millicents+?, updated_at=?`,
+		summaryID, summary.TargetType, summary.TargetID, summary.Period, summary.DateKey, summary.InputTokens, summary.OutputTokens, summary.TotalTokens, summary.RequestCount, summary.CostMillicents, now,
+		summary.InputTokens, summary.OutputTokens, summary.TotalTokens, summary.RequestCount, summary.CostMillicents, now)
+	return err
+}
+
+// ── Model Prices ──
+
+func (s *SQLiteStore) ListModelPrices(_ context.Context) ([]models.ModelPrice, error) {
+	rows, err := s.db.Query(`SELECT model_id, provider, COALESCE(display_name,''), input_price_millicents, output_price_millicents, COALESCE(cache_read_price_millicents,0), active, updated_at FROM model_prices ORDER BY provider, model_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.ModelPrice
+	for rows.Next() {
+		var p models.ModelPrice
+		var active int
+		var ua string
+		if err := rows.Scan(&p.ModelID, &p.Provider, &p.DisplayName, &p.InputPriceMillicents, &p.OutputPriceMillicents, &p.CacheReadPriceMillicents, &active, &ua); err != nil {
+			return out, err
+		}
+		p.Active = active == 1
+		p.UpdatedAt = ua
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) UpsertModelPrice(_ context.Context, p models.ModelPrice) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	active := 0
+	if p.Active {
+		active = 1
+	}
+	_, err := s.db.Exec(`INSERT INTO model_prices (model_id, provider, display_name, input_price_millicents, output_price_millicents, cache_read_price_millicents, active, updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(model_id) DO UPDATE SET provider=?, display_name=?, input_price_millicents=?, output_price_millicents=?, cache_read_price_millicents=?, active=?, updated_at=?`,
+		p.ModelID, p.Provider, p.DisplayName, p.InputPriceMillicents, p.OutputPriceMillicents, p.CacheReadPriceMillicents, active, now,
+		p.Provider, p.DisplayName, p.InputPriceMillicents, p.OutputPriceMillicents, p.CacheReadPriceMillicents, active, now)
+	return err
+}
+
+// ── scan helpers for token quota ──
+
+func scanTokenQuotas(rows *sql.Rows) ([]models.TokenQuota, error) {
+	var out []models.TokenQuota
+	for rows.Next() {
+		var q models.TokenQuota
+		var active int
+		var ca, ua string
+		if err := rows.Scan(&q.QuotaID, &q.TargetType, &q.TargetID, &q.QuotaName, &q.DailyLimit, &q.WeeklyLimit, &q.MonthlyLimit, &q.TotalLimit, &q.PerRequestLimit, &q.MaxConcurrency, &q.WarnThreshold, &q.BlockThreshold, &q.Priority, &active, &ca, &ua); err != nil {
+			return out, err
+		}
+		q.Active = active == 1
+		q.CreatedAt = ca
+		q.UpdatedAt = ua
+		out = append(out, q)
+	}
+	return out, rows.Err()
+}
+
+func scanTokenUsageLogs(rows *sql.Rows, total int) ([]models.TokenUsageLog, int, error) {
+	var out []models.TokenUsageLog
+	for rows.Next() {
+		var l models.TokenUsageLog
+		if err := rows.Scan(&l.LogID, &l.AgentID, &l.FamilyGroupID, &l.SpanID, &l.TraceID, &l.ModelName, &l.Provider, &l.InputTokens, &l.OutputTokens, &l.TotalTokens, &l.CacheReadTokens, &l.CacheWriteTokens, &l.CostMillicents, &l.QuotaStatus, &l.OccurredAt, &l.CreatedAt); err != nil {
+			return out, total, err
+		}
+		out = append(out, l)
+	}
+	return out, total, rows.Err()
 }
 
 // ── scan helpers ──

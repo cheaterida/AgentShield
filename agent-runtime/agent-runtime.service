@@ -16,7 +16,7 @@ StandardError=journal
 # 安全加固
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=yes
+ProtectHome=read-only
 ReadWritePaths=/var/lib/agentshield
 PrivateTmp=yes
 

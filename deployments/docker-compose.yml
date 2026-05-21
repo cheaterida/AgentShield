@@ -51,6 +51,10 @@ services:
       AGENTSHIELD_SQLITE_PATH: "/data/agentshield.db"
       AGENTSHIELD_OPA_BASE_URL: "http://opa:8181"
       AGENTSHIELD_ML_PIPELINE_URL: "http://ml-pipeline:8090"
+      AGENTSHIELD_REDIS_ADDR: "redis:6379"
+      AGENTSHIELD_REDIS_PASSWORD: ""
+      AGENTSHIELD_REDIS_DB: "0"
+      AGENTSHIELD_CACHE_TTL: "5m"
       AGENTSHIELD_LOG_LEVEL: "info"
     ports:
       - "8080:8080"
@@ -60,6 +64,27 @@ services:
       - policy_data:/policies:ro
     depends_on:
       - opa
+      - redis
+
+  # ── Redis 缓存 (Track D1) ──
+  redis:
+    image: redis:7-alpine
+    profiles: ["full", "core", "prod"]
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
 
   # ── OPA 策略引擎 ──
   opa:
@@ -120,6 +145,13 @@ services:
       AGENTSHIELD_EVENT_BATCH_SIZE: "50"
       AGENTSHIELD_EVENT_UPLOAD_INTERVAL_SECS: "30"
       RUST_LOG: "info"
+      # Track A — checkpoint / workspace directories
+      AGENTSHIELD_CHECKPOINT_ENABLED: "true"
+      AGENTSHIELD_CHECKPOINT_DIR: "/var/lib/agentshield/checkpoints"
+      AGENTSHIELD_WORKSPACE_DIR: "/workspace"
+    volumes:
+      - agentshield_checkpoints:/var/lib/agentshield/checkpoints
+      - workspace_data:/workspace
     depends_on:
       - management-server
 
@@ -142,6 +174,13 @@ services:
       AGENTSHIELD_EVENT_UPLOAD_INTERVAL_SECS: "${AGENTSHIELD_EVENT_UPLOAD_INTERVAL_SECS:-30}"
       AGENTSHIELD_EBPF_OBJECT: "/usr/local/lib/agentshield/ebpf/agentshield-ebpf.o"
       RUST_LOG: "${RUST_LOG:-info}"
+      # Track A — checkpoint / workspace directories
+      AGENTSHIELD_CHECKPOINT_ENABLED: "true"
+      AGENTSHIELD_CHECKPOINT_DIR: "/var/lib/agentshield/checkpoints"
+      AGENTSHIELD_WORKSPACE_DIR: "/workspace"
+    volumes:
+      - agentshield_checkpoints:/var/lib/agentshield/checkpoints
+      - workspace_data:/workspace
     depends_on:
       - management-server
 
@@ -177,3 +216,7 @@ volumes:
   ml_models:
   ml_policies:
   policy_data:
+  # Track A — checkpoint & workspace persistent volumes
+  agentshield_checkpoints:
+  workspace_data:
+  redis_data:

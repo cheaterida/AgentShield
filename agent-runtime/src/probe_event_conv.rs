@@ -29,8 +29,17 @@ pub fn resource_ref_from_event(event: &ProbeEvent) -> String {
 pub fn attrs_from_event(event: &ProbeEvent) -> HashMap<String, String> {
     let mut attrs = HashMap::new();
     attrs.insert("pid".to_string(), event.pid.to_string());
+    attrs.insert("tid".to_string(), event.tid.to_string());
     attrs.insert("comm".to_string(), event.comm_str().to_string());
     attrs.insert("uid".to_string(), event.uid.to_string());
+    // For network events, expose the destination IP:port as network_dst
+    let syscall = event.syscall_str();
+    if syscall == "connect" || syscall == "bind" {
+        let dst = event.filename_str();
+        if !dst.is_empty() && dst != "(unknown-address)" {
+            attrs.insert("network_dst".to_string(), dst.to_string());
+        }
+    }
     attrs
 }
 
@@ -127,15 +136,26 @@ mod tests {
     }
 
     #[test]
-    fn test_attrs_contains_pid_comm_uid() {
+    fn test_attrs_contains_pid_tid_comm_uid() {
         let mut event = ProbeEvent::default();
         event.pid = 1234;
+        event.tid = 5678;
         event.uid = 1000;
         event.set_comm("testproc");
         let attrs = attrs_from_event(&event);
         assert_eq!(attrs.get("pid").unwrap(), "1234");
         assert_eq!(attrs.get("comm").unwrap(), "testproc");
+        assert_eq!(attrs.get("tid").unwrap(), "5678");
         assert_eq!(attrs.get("uid").unwrap(), "1000");
+    }
+
+    #[test]
+    fn test_network_dst_for_connect() {
+        let mut event = ProbeEvent::default();
+        event.set_syscall("connect");
+        event.set_filename("10.0.1.25:5432");
+        let attrs = attrs_from_event(&event);
+        assert_eq!(attrs.get("network_dst").unwrap(), "10.0.1.25:5432");
     }
 
     #[test]

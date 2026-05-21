@@ -9,6 +9,10 @@ description = "员工侧 Agent 运行时：探针生命周期、策略缓存、�
 name = "agent-runtime"
 path = "src/main.rs"
 
+[features]
+default = []
+checkpoint = ["rmp-serde", "blake3", "serde_bytes", "dep:inotify"]
+
 [dependencies]
 tokio.workspace = true
 tracing.workspace = true
@@ -22,6 +26,12 @@ aya = { workspace = true }
 agentshield-ebpf-common = { path = "../ebpf-probes/agentshield-ebpf-common" }
 bytes = "1"
 num_cpus = "1"
+rmp-serde = { version = "1", optional = true }
+blake3 = { version = "1", optional = true }
+serde_bytes = { version = "0.11", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+inotify = { version = "0.11", optional = true }
 
 [dev-dependencies]
 mockito = { version = "1", default-features = false }

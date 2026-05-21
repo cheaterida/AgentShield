@@ -18,6 +18,13 @@ function detectSyscall(event: AuditEvent): string {
   return action;
 }
 
+const SYSCALL_TO_ACTION: Record<string, string> = {
+  connect: 'network_connect',
+  bind: 'socket_create',
+  execve: 'exec',
+  openat: 'read',  // 'read' covers the most common file access case
+};
+
 function formatTime(iso: string): string {
   try { return new Date(iso).toLocaleString(); } catch { return iso; }
 }
@@ -66,7 +73,7 @@ export function SecurityEventsPage() {
   const applyFilter = () => {
     const p = new URLSearchParams();
     p.set('limit', '50');
-    if (filter) p.set('action', filter);
+    if (filter) p.set('action', SYSCALL_TO_ACTION[filter] || filter);
     setParams(p.toString());
   };
 
@@ -102,7 +109,7 @@ export function SecurityEventsPage() {
           return (
             <div
               key={s}
-              onClick={() => { setFilter(s); const p = new URLSearchParams(); p.set('limit', '50'); p.set('action', s); setParams(p.toString()); }}
+              onClick={() => { setFilter(s); const p = new URLSearchParams(); p.set('limit', '50'); p.set('action', SYSCALL_TO_ACTION[s] || s); setParams(p.toString()); }}
               style={{
                 background: '#fff', borderRadius: 10, padding: '14px 16px', cursor: 'pointer',
                 border: filter === s ? `2px solid ${meta.color}` : '1px solid #e2e8f0',

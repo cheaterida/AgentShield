@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
-import type { TraceGroup, FamilyGroupWithAgents, TraceSpan, AuditEvent } from '../api/types';
+import type { TraceGroup, FamilyGroupWithAgents, TraceSpan } from '../api/types';
 
 interface MsgItem {
   role: string;
@@ -93,51 +93,6 @@ function roleBadgeStyle(role: keyof typeof roleColors): React.CSSProperties {
   };
 }
 
-function groupEventsToTraces(events: AuditEvent[]): TraceGroup[] {
-  const groups = new Map<string, TraceGroup>();
-  for (const ev of events) {
-    const traceId = ev.attributes?.trace_id || ev.event_id;
-    let g = groups.get(traceId);
-    if (!g) {
-      g = {
-        trace_id: traceId,
-        span_count: 0,
-        earliest: ev.occurred_at,
-        latest: ev.occurred_at,
-        spans: [],
-      };
-      groups.set(traceId, g);
-    }
-    const durMs = parseInt(ev.attributes?.duration || '0', 10) || 0;
-    const attrs: Record<string, string> = {};
-    if (ev.attributes) {
-      for (const [k, v] of Object.entries(ev.attributes)) {
-        if (v !== undefined) attrs[k] = v;
-      }
-    }
-    const span: TraceSpan = {
-      trace_id: traceId,
-      span_id: ev.event_id,
-      parent_id: '',
-      name: `${ev.action} ${ev.resource_ref}`,
-      kind: 0,
-      start_time: ev.occurred_at,
-      end_time: ev.occurred_at,
-      duration: durMs,
-      status_code: 0,
-      attributes: attrs,
-      events: [],
-      agent_id: ev.agent_id,
-      family_group_id: ev.family_group_id,
-    };
-    g.spans.push(span);
-    g.span_count++;
-    if (ev.occurred_at < g.earliest) g.earliest = ev.occurred_at;
-    if (ev.occurred_at > g.latest) g.latest = ev.occurred_at;
-  }
-  return Array.from(groups.values());
-}
-
 const styles: Record<string, React.CSSProperties> = {
   container: { display: 'flex', height: 'calc(100vh - 48px)', background: '#f1f5f9', margin: -24 },
   sidebar: { width: 260, minWidth: 260, background: '#0f172a', color: '#e2e8f0', display: 'flex', flexDirection: 'column', overflow: 'hidden' },
@@ -169,26 +124,8 @@ export function TracesPage() {
 
   const loadTree = useCallback(async () => {
     try {
-      const [groupsData, agentsData] = await Promise.all([
-        api.listFamilyGroupsWithAgents(),
-        api.listAgents(),
-      ]);
-      const groups = (groupsData.groups || []).map((g) => {
-        const groupAgents = (agentsData.agents || [])
-          .filter((a) => a.family_group_id === g.id)
-          .map((a) => ({
-            id: a.id,
-            name: a.display_name || a.id,
-            hostname: a.labels?.hostname,
-            status: a.status,
-          }));
-        return {
-          id: g.id,
-          name: g.display_name || g.id,
-          agent_count: groupAgents.length,
-          agents: groupAgents,
-        };
-      });
+      const data = await api.listFamilyGroupsWithAgents();
+      const groups = data.groups || [];
       setTree(groups);
       if (groups.length > 0) {
         setOpenGroups((prev) => { const next = new Set(prev); next.add(groups[0].id); return next; });
@@ -201,7 +138,7 @@ export function TracesPage() {
     setError(null);
     try {
       const data = await api.listTraces('limit=200');
-      setTraces(groupEventsToTraces(data.events || []));
+      setTraces(data.traces || []);
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载失败');
     } finally {
@@ -213,8 +150,8 @@ export function TracesPage() {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.listTraces(`limit=200&agent_id=${encodeURIComponent(agentId)}`);
-      setTraces(groupEventsToTraces(data.events || []));
+      const data = await api.listTracesByAgent(agentId, 'limit=200');
+      setTraces(data.traces || []);
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载失败');
     } finally {
@@ -289,7 +226,7 @@ export function TracesPage() {
       return (
         <div style={styles.centerMsg}>
           暂无 trace 数据
-          <div style={{ fontSize: 12, marginTop: 6 }}>请确保 agent 正在运行并产生 LLM 调用</div>
+          <div style={{ fontSize: 12, marginTop: 6 }}>请确保 agent SDK 已集成 tracer 并产生 LLM 调用</div>
         </div>
       );
     }

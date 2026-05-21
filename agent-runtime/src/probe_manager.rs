@@ -12,18 +12,46 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
+/// System processes that are always excluded from eBPF event collection.
+const SYSTEM_BLOCKLIST: &[&str] = &[
+    "systemd", "tailscaled", "tailscale", "sshd", "dockerd",
+    "containerd", "kubelet", "kube-proxy", "NetworkManager",
+    "chronyd", "rsyslogd", "udisksd", "polkitd", "accounts-daemon",
+    // GNOME desktop
+    "gdm-session-wor", "gdm-wayland-ses", "gdm-x-session",
+    "gnome-shell", "gnome-session-b", "gnome-session-c",
+    "gnome-settings-", "gnome-software", "gnome-shell-cal",
+    "gsd-", "gvfsd-", "gvfs-", "gjs", "nautilus",
+    "evolution-", "goa-", "tracker-", "tracker-miner",
+    "xdg-", "at-spi-", "pulseaudio", "pipewire",
+    "dbus-daemon", "dbus-broker", "rtkit-daemon",
+    "upowerd", "wpa_supplicant", "ModemManager",
+    "cupsd", "cups-browsed", "avahi-daemon",
+    "irqbalance", "multipathd", "packagekitd",
+    "snapd", "snap-confine", "snap-update-ns",
+    "bluetoothd", "colord", "fwupd", "geoclue",
+    "kerneloops", "low-memory-mon", "mpt3sas_poll",
+    "switcheroo-cont", "thermald", "udisksd",
+    "unattended-upgr", "wsmand",
+    // Common service accounts
+    "whoopsie", "speech-dispatc", "speech-dispatch",
+    "spice-vdagent", "spice-vdagentd",
+];
+
 pub struct ProbeManager {
     active_count: AtomicI32,
     agent_id: String,
     family_group_id: String,
+    comm_allowlist: Vec<String>,
 }
 
 impl ProbeManager {
-    pub fn new(agent_id: &str, family_group_id: &str) -> Self {
+    pub fn new(agent_id: &str, family_group_id: &str, comm_allowlist: Vec<String>) -> Self {
         Self {
             active_count: AtomicI32::new(0),
             agent_id: agent_id.to_string(),
             family_group_id: family_group_id.to_string(),
+            comm_allowlist,
         }
     }
 
@@ -66,7 +94,8 @@ impl ProbeManager {
     /// AsyncPerfEventArray per-CPU, converts ProbeEvent → AuditEventPayload,
     /// pushes into EventBuffer.
     ///
-    /// Non-Linux (demo mode): generates synthetic events every 10s.
+    /// Non-Linux (demo mode): generates synthetic events every 10s
+    /// ONLY if no comm allowlist is configured.
     pub async fn start_event_reader(
         self: Arc<Self>,
         buffer: Arc<EventBuffer>,
@@ -75,19 +104,31 @@ impl ProbeManager {
         {
             let agent_id = self.agent_id.clone();
             let family_group_id = self.family_group_id.clone();
+            let allowlist = self.comm_allowlist.clone();
             tokio::spawn(async move {
-                if let Err(e) = run_real_ebpf_reader(agent_id, family_group_id, buffer.clone()).await {
+                if let Err(e) = run_real_ebpf_reader(agent_id, family_group_id, buffer.clone(), &allowlist).await {
                     tracing::warn!("real eBPF reader failed ({}), falling back to demo mode", e);
-                    // Fall back to demo mode on failure
-                    run_demo_reader(buffer).await;
+                    // Only run demo if no allowlist is set (allowlist means user wants real data)
+                    if allowlist.is_empty() {
+                        run_demo_reader(buffer).await;
+                    } else {
+                        tracing::warn!("demo mode suppressed because comm allowlist is configured");
+                    }
                 }
             })
         }
 
         #[cfg(not(target_os = "linux"))]
         {
+            let allowlist = self.comm_allowlist.clone();
             tokio::spawn(async move {
-                run_demo_reader(buffer).await;
+                if allowlist.is_empty() {
+                    run_demo_reader(buffer).await;
+                } else {
+                    tracing::warn!("demo mode suppressed because comm allowlist is configured — real eBPF requires Linux");
+                    // Just keep the task alive, doing nothing
+                    std::future::pending::<()>().await;
+                }
             })
         }
     }
@@ -100,6 +141,7 @@ async fn run_real_ebpf_reader(
     agent_id: String,
     family_group_id: String,
     buffer: Arc<EventBuffer>,
+    comm_allowlist: &[String],
 ) -> Result<(), String> {
     use aya::include_bytes_aligned;
     use aya::maps::perf::AsyncPerfEventArray;
@@ -162,6 +204,8 @@ async fn run_real_ebpf_reader(
     let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut tasks = Vec::new();
 
+    let shared_allowlist: Arc<[String]> = comm_allowlist.iter().cloned().collect::<Vec<_>>().into();
+
     for cpu_id in online_cpus()? {
         let mut buf = perf_array.open(cpu_id, None).map_err(|e| {
             format!("failed to open perf buffer for CPU {}: {}", cpu_id, e)
@@ -171,6 +215,7 @@ async fn run_real_ebpf_reader(
         let fg_id = family_group_id.clone();
         let buf_clone = buffer.clone();
         let counter = event_counter.clone();
+        let allowlist = shared_allowlist.clone();
 
         tasks.push(tokio::spawn(async move {
             let mut buffers = vec![BytesMut::with_capacity(
@@ -197,10 +242,21 @@ async fn run_real_ebpf_reader(
                                     );
                                     continue;
                                 }
+
+                                // Process name filter
+                                let comm = event.comm_str();
+                                if is_system_process(&comm) {
+                                    continue;
+                                }
+                                if !allowlist.is_empty() && !allowlist.iter().any(|a| a == &comm) {
+                                    continue;
+                                }
+
                                 let payload =
                                     probe_event_conv::convert(&event, &a_id, &fg_id);
                                 if payload.resource_ref.is_empty()
                                     || payload.resource_ref == "(unknown)"
+                                    || payload.resource_ref == "(unknown-address)"
                                 {
                                     continue;
                                 }
@@ -319,6 +375,10 @@ async fn run_demo_reader(buffer: Arc<EventBuffer>) {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+fn is_system_process(comm: &str) -> bool {
+    SYSTEM_BLOCKLIST.contains(&comm)
+}
 
 fn build_attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
     pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()

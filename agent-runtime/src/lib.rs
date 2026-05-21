@@ -7,3 +7,6 @@ pub mod policy_cache;
 pub mod probe_event_conv;
 pub mod probe_manager;
 pub mod supervisor;
+
+#[cfg(feature = "checkpoint")]
+pub mod checkpoint;

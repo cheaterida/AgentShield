@@ -8,6 +8,7 @@ export function AgentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [agent, setAgent] = useState<Agent | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [tokenUsage, setTokenUsage] = useState<Record<string, number> | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fetchAgent = useCallback(async (silent?: boolean) => {
@@ -31,12 +32,22 @@ export function AgentDetailPage() {
     }
   }, [id]);
 
+  const fetchTokenUsage = useCallback(async (silent?: boolean) => {
+    if (!id) return;
+    try {
+      setTokenUsage(await api.getAgentUsage(id));
+    } catch (e) {
+      if (!silent) console.error('failed to fetch token usage', e);
+    }
+  }, [id]);
+
   useEffect(() => {
     fetchAgent();
     fetchEvents();
-    const t = setInterval(() => { fetchAgent(true); fetchEvents(true); }, 10000);
+    fetchTokenUsage();
+    const t = setInterval(() => { fetchAgent(true); fetchEvents(true); fetchTokenUsage(true); }, 10000);
     return () => clearInterval(t);
-  }, [fetchAgent, fetchEvents]);
+  }, [fetchAgent, fetchEvents, fetchTokenUsage]);
 
   if (error) {
     return (
@@ -90,6 +101,30 @@ export function AgentDetailPage() {
           </div>
         </div>
       </div>
+
+      {/* Token Usage */}
+      {tokenUsage && (
+        <div style={{ ...cardStyle, marginBottom: 24 }}>
+          <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>Token 用量</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+            <div style={{ background: '#f8fafc', borderRadius: 8, padding: 12 }}>
+              <div style={{ color: '#64748b', fontSize: 12, marginBottom: 4 }}>今日</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: '#334155' }}>{(tokenUsage.daily_total_tokens || 0).toLocaleString()}</div>
+              <div style={{ color: '#94a3b8', fontSize: 11 }}>${((tokenUsage.daily_cost_millicents || 0) / 100000).toFixed(2)}</div>
+            </div>
+            <div style={{ background: '#f8fafc', borderRadius: 8, padding: 12 }}>
+              <div style={{ color: '#64748b', fontSize: 12, marginBottom: 4 }}>本月</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: '#334155' }}>{(tokenUsage.monthly_total_tokens || 0).toLocaleString()}</div>
+              <div style={{ color: '#94a3b8', fontSize: 11 }}>${((tokenUsage.monthly_cost_millicents || 0) / 100000).toFixed(2)}</div>
+            </div>
+            <div style={{ background: '#f8fafc', borderRadius: 8, padding: 12 }}>
+              <div style={{ color: '#64748b', fontSize: 12, marginBottom: 4 }}>累计</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: '#334155' }}>{(tokenUsage.total_total_tokens || 0).toLocaleString()}</div>
+              <div style={{ color: '#94a3b8', fontSize: 11 }}>${((tokenUsage.total_cost_millicents || 0) / 100000).toFixed(2)}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Event timeline */}
       <div style={cardStyle}>

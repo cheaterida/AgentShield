@@ -11,6 +11,8 @@ import {
   WifiOff,
   Radio,
   Activity,
+  BarChart3,
+  Sliders,
 } from 'lucide-react';
 import { WebSocketContext } from './context/WebSocketContext';
 import { DashboardPage } from './pages/DashboardPage';
@@ -22,6 +24,8 @@ import { PoliciesPage } from './pages/PoliciesPage';
 import { FamilyGroupsPage } from './pages/FamilyGroupsPage';
 import { TracesPage } from './pages/TracesPage';
 import { SecurityEventsPage } from './pages/SecurityEventsPage';
+import { TokenUsagePage } from './pages/TokenUsagePage';
+import { QuotaManagementPage } from './pages/QuotaManagementPage';
 
 // Error boundary to catch render-time crashes and show debug info instead of blank screen.
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -62,6 +66,8 @@ const navItems = [
   { to: '/security-events', icon: Activity, label: '安全事件' },
   { to: '/audit-log', icon: ScrollText, label: '审计日志' },
   { to: '/alerts', icon: AlertTriangle, label: '安全告警' },
+  { to: '/token-usage', icon: BarChart3, label: 'Token 用量' },
+  { to: '/quota', icon: Sliders, label: '配额管理' },
   { to: '/policies', icon: Shield, label: '策略管理' },
   { to: '/family-groups', icon: Users, label: '家庭组' },
 ];
@@ -157,6 +163,8 @@ export function App() {
         <Route path="/security-events" element={<SecurityEventsPage />} />
         <Route path="/audit-log" element={<AuditLogPage />} />
         <Route path="/alerts" element={<AlertsPage />} />
+        <Route path="/token-usage" element={<TokenUsagePage />} />
+        <Route path="/quota" element={<QuotaManagementPage />} />
         <Route path="/policies" element={<PoliciesPage />} />
         <Route path="/family-groups" element={<FamilyGroupsPage />} />
       </Route>

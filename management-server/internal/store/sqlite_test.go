@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -285,5 +286,213 @@ func TestSQLite_DashboardStats(t *testing.T) {
 	}
 	if stats.OnlineAgentCount != 1 {
 		t.Errorf("expected 1 online, got %d", stats.OnlineAgentCount)
+	}
+}
+
+// ── Token Quota CRUD ──
+
+func TestSQLite_TokenQuotaCRUD(t *testing.T) {
+	s := newTestSQLite(t)
+	ctx := context.Background()
+
+	q := models.TokenQuota{
+		QuotaID:    "q1",
+		TargetType: "agent",
+		TargetID:   "agent-001",
+		QuotaName:  "default",
+		DailyLimit: 1000000, MonthlyLimit: 20000000,
+		WarnThreshold: 0.8, BlockThreshold: 1.0,
+		Priority: 5, Active: true,
+	}
+	if err := s.CreateTokenQuota(ctx, q); err != nil {
+		t.Fatalf("CreateTokenQuota: %v", err)
+	}
+
+	got, found, err := s.GetTokenQuota(ctx, "agent", "agent-001")
+	if err != nil {
+		t.Fatalf("GetTokenQuota: %v", err)
+	}
+	if !found {
+		t.Fatal("expected quota to be found")
+	}
+	if got.DailyLimit != 1000000 {
+		t.Errorf("got DailyLimit %d, want 1000000", got.DailyLimit)
+	}
+
+	// Update
+	q.DailyLimit = 500000
+	if err := s.UpdateTokenQuota(ctx, q); err != nil {
+		t.Fatalf("UpdateTokenQuota: %v", err)
+	}
+	got, _, _ = s.GetTokenQuota(ctx, "agent", "agent-001")
+	if got.DailyLimit != 500000 {
+		t.Errorf("got DailyLimit %d after update, want 500000", got.DailyLimit)
+	}
+
+	// List
+	quotas, err := s.ListTokenQuotas(ctx, "agent")
+	if err != nil {
+		t.Fatalf("ListTokenQuotas: %v", err)
+	}
+	if len(quotas) != 1 {
+		t.Errorf("expected 1 quota, got %d", len(quotas))
+	}
+
+	// Delete
+	if err := s.DeleteTokenQuota(ctx, "q1"); err != nil {
+		t.Fatalf("DeleteTokenQuota: %v", err)
+	}
+	_, found, _ = s.GetTokenQuota(ctx, "agent", "agent-001")
+	if found {
+		t.Error("expected quota not found after delete")
+	}
+}
+
+// ── Token Usage Logs ──
+
+func TestSQLite_TokenUsageLogs(t *testing.T) {
+	s := newTestSQLite(t)
+	ctx := context.Background()
+
+	log := models.TokenUsageLog{
+		LogID: "log1", AgentID: "a1", FamilyGroupID: "fg1",
+		SpanID: "span1", ModelName: "gpt-4o",
+		InputTokens: 100, OutputTokens: 50, TotalTokens: 150,
+		CostMillicents: 75000, QuotaStatus: "ok",
+		OccurredAt: "2026-05-20T10:00:00Z",
+	}
+	if err := s.AppendTokenUsageLog(ctx, log); err != nil {
+		t.Fatalf("AppendTokenUsageLog: %v", err)
+	}
+
+	logs, total, err := s.GetTokenUsageLogs(ctx, models.TokenUsageLogFilter{AgentID: "a1", Limit: 10})
+	if err != nil {
+		t.Fatalf("GetTokenUsageLogs: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("expected total=1, got %d", total)
+	}
+	if len(logs) != 1 {
+		t.Errorf("expected 1 log, got %d", len(logs))
+	}
+	if logs[0].ModelName != "gpt-4o" {
+		t.Errorf("got model %s", logs[0].ModelName)
+	}
+}
+
+func TestSQLite_TokenUsageLogFilter(t *testing.T) {
+	s := newTestSQLite(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		l := models.TokenUsageLog{
+			LogID:         fmt.Sprintf("log%d", i+1),
+			AgentID:       "a1",
+			FamilyGroupID: "fg1",
+			SpanID:        fmt.Sprintf("span%d", i+1),
+			ModelName:     "gpt-4o",
+			InputTokens:   int64((i + 1) * 100),
+			TotalTokens:   int64((i + 1) * 150),
+			CostMillicents: int64((i + 1) * 75000),
+			QuotaStatus:   "ok",
+			OccurredAt:    fmt.Sprintf("2026-05-%02dT10:00:00Z", 20+i),
+		}
+		s.AppendTokenUsageLog(ctx, l)
+	}
+
+	// Test time range filter
+	logs, total, err := s.GetTokenUsageLogs(ctx, models.TokenUsageLogFilter{
+		FromTime: "2026-05-21T00:00:00Z",
+		ToTime:   "2026-05-23T00:00:00Z",
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("GetTokenUsageLogs: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("expected 2 logs in range, got %d", total)
+	}
+	if len(logs) != 2 {
+		t.Errorf("expected 2 logs, got %d", len(logs))
+	}
+}
+
+// ── Token Usage Summary ──
+
+func TestSQLite_TokenUsageSummary(t *testing.T) {
+	s := newTestSQLite(t)
+	ctx := context.Background()
+
+	sum := models.TokenUsageSummary{
+		TargetType: "agent", TargetID: "a1",
+		Period: "daily", DateKey: "2026-05-20",
+		InputTokens: 1000, OutputTokens: 500, TotalTokens: 1500,
+		RequestCount: 10, CostMillicents: 750000,
+	}
+	if err := s.UpsertTokenUsageSummary(ctx, sum); err != nil {
+		t.Fatalf("UpsertTokenUsageSummary: %v", err)
+	}
+
+	// Second upsert should add to existing
+	if err := s.UpsertTokenUsageSummary(ctx, sum); err != nil {
+		t.Fatalf("UpsertTokenUsageSummary (2nd): %v", err)
+	}
+
+	summaries, err := s.GetTokenUsageSummary(ctx, "agent", "a1", "daily")
+	if err != nil {
+		t.Fatalf("GetTokenUsageSummary: %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("expected 1 summary, got %d", len(summaries))
+	}
+	if summaries[0].TotalTokens != 3000 {
+		t.Errorf("expected TotalTokens=3000 (after upsert merge), got %d", summaries[0].TotalTokens)
+	}
+	if summaries[0].RequestCount != 20 {
+		t.Errorf("expected RequestCount=20 (after upsert merge), got %d", summaries[0].RequestCount)
+	}
+}
+
+// ── Model Prices ──
+
+func TestSQLite_ModelPrices(t *testing.T) {
+	s := newTestSQLite(t)
+	ctx := context.Background()
+
+	prices, err := s.ListModelPrices(ctx)
+	if err != nil {
+		t.Fatalf("ListModelPrices: %v", err)
+	}
+	// Seed data from migration
+	if len(prices) == 0 {
+		t.Fatal("expected model prices from seed data")
+	}
+
+	// Upsert new
+	p := models.ModelPrice{
+		ModelID:              "custom-model",
+		Provider:             "custom",
+		DisplayName:          "Custom Model",
+		InputPriceMillicents: 100000,
+		OutputPriceMillicents: 400000,
+		Active:               true,
+	}
+	if err := s.UpsertModelPrice(ctx, p); err != nil {
+		t.Fatalf("UpsertModelPrice: %v", err)
+	}
+
+	prices, err = s.ListModelPrices(ctx)
+	if err != nil {
+		t.Fatalf("ListModelPrices: %v", err)
+	}
+	found := false
+	for _, p := range prices {
+		if p.ModelID == "custom-model" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected custom-model in price list")
 	}
 }

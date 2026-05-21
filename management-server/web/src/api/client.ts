@@ -1,3 +1,5 @@
+import type { TokenQuota, TokenUsageLog, TokenUsageSummary, ModelPrice } from './types';
+
 const BASE = '/api/v1';
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -74,19 +76,50 @@ export const api = {
       body: JSON.stringify({ status }),
     }),
 
-  // Traces — grouped from audit events on frontend; a dedicated Python trace service
-  // (serve-web.py :8081 querying ClickHouse) is planned for rich LLM-content traces.
+  // Traces — real ClickHouse data via serve-web.py :8081
+  // Vite proxies /api/v1/traces* to :8081, /api/* to :8080
   listTraces: (params?: string) =>
-    request<{ events: import('./types').AuditEvent[]; total: number }>(
-      `/audit/events${params ? `?${params}` : ''}`
+    request<{ traces: import('./types').TraceGroup[]; total: number }>(
+      `/traces${params ? `?${params}` : ''}`
     ),
-  // listFamilyGroupsWithAgents — composed client-side from listFamilyGroups + listAgents.
+  listTracesByAgent: (agentId: string, params?: string) =>
+    request<{ traces: import('./types').TraceGroup[]; total: number; agent_id: string; family_group_id: string }>(
+      `/traces/by-agent?agent_id=${encodeURIComponent(agentId)}${params ? `&${params}` : ''}`
+    ),
   listFamilyGroupsWithAgents: () =>
-    request<{ groups: import('./types').FamilyGroup[] }>('/family-groups'),
+    request<{ groups: import('./types').FamilyGroupWithAgents[] }>('/family-groups-with-agents'),
 
   // Dashboard
   getDashboardStats: (familyGroupId?: string) =>
     request<import('./types').DashboardStats>(
       `/dashboard/stats${familyGroupId ? `?family_group_id=${encodeURIComponent(familyGroupId)}` : ''}`
     ),
+
+  // Token Quota — Usage
+  getAgentUsage: (id: string) =>
+    request<Record<string, number>>(`/quota/agents/${encodeURIComponent(id)}/usage`),
+  getFamilyGroupUsage: (id: string) =>
+    request<{ summaries: TokenUsageSummary[] }>(`/quota/family-groups/${encodeURIComponent(id)}/usage`),
+  getUsageSummary: (params?: string) =>
+    request<{ summaries: TokenUsageSummary[] }>(`/quota/usage/summary${params ? `?${params}` : ''}`),
+
+  // Token Quota — Model Prices
+  listPrices: () =>
+    request<{ prices: ModelPrice[] }>('/quota/prices'),
+  upsertPrice: (body: Partial<ModelPrice>) =>
+    request<ModelPrice>('/quota/prices', { method: 'POST', body: JSON.stringify(body) }),
+
+  // Token Quota — Rules
+  listQuotas: (params?: string) =>
+    request<{ quotas: TokenQuota[] }>(`/quota/quotas${params ? `?${params}` : ''}`),
+  createQuota: (body: Partial<TokenQuota>) =>
+    request<TokenQuota>('/quota/quotas', { method: 'POST', body: JSON.stringify(body) }),
+  updateQuota: (id: string, body: Partial<TokenQuota>) =>
+    request<TokenQuota>(`/quota/quotas/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  deleteQuota: (id: string) =>
+    request<{ deleted: boolean }>(`/quota/quotas/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // Token Quota — Logs
+  listUsageLogs: (params?: string) =>
+    request<{ logs: TokenUsageLog[]; total: number }>(`/quota/logs${params ? `?${params}` : ''}`),
 };

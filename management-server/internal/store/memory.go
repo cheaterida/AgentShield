@@ -37,6 +37,11 @@ type Memory struct {
 	policies     []models.PolicyBundle
 	alerts       []models.RiskAlert
 	auditCap     int
+
+	tokenQuotas     map[string]models.TokenQuota
+	tokenUsageLogs  []models.TokenUsageLog
+	usageSummaries  []models.TokenUsageSummary
+	modelPrices     map[string]models.ModelPrice
 }
 
 func NewMemory(auditCap int) *Memory {
@@ -44,9 +49,11 @@ func NewMemory(auditCap int) *Memory {
 		auditCap = 10000
 	}
 	return &Memory{
-		agents:       make(map[string]models.Agent),
-		familyGroups: make(map[string]models.FamilyGroup),
-		auditCap:     auditCap,
+		agents:          make(map[string]models.Agent),
+		familyGroups:    make(map[string]models.FamilyGroup),
+		auditCap:        auditCap,
+		tokenQuotas:     make(map[string]models.TokenQuota),
+		modelPrices:     make(map[string]models.ModelPrice),
 	}
 }
 
@@ -201,6 +208,22 @@ func (m *Memory) UpdateAgentHeartbeat(_ context.Context, id string) error {
 	a.UpdatedAt = now
 	m.agents[id] = a
 	return nil
+}
+
+func (m *Memory) MarkStaleAgentsOffline(_ context.Context, timeout time.Duration) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cutoff := time.Now().UTC().Add(-timeout)
+	count := 0
+	for id, a := range m.agents {
+		if a.Status == "online" && a.LastHeartbeatAt != nil && a.LastHeartbeatAt.Before(cutoff) {
+			a.Status = "offline"
+			a.UpdatedAt = time.Now().UTC()
+			m.agents[id] = a
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (m *Memory) UpdateAgentRiskScore(_ context.Context, id string, score float64) error {
@@ -473,4 +496,171 @@ func (m *Memory) GetDashboardStats(_ context.Context, familyGroupID string) (mod
 	}
 	ds.RecentAlerts = openAlerts
 	return ds, nil
+}
+
+// ── Token Quota ──
+
+func (m *Memory) CreateTokenQuota(_ context.Context, q models.TokenQuota) error {
+	if q.QuotaID == "" {
+		return errors.New("quota_id required")
+	}
+	m.mu.Lock()
+	m.tokenQuotas[q.QuotaID] = q
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Memory) GetTokenQuota(_ context.Context, targetType, targetID string) (models.TokenQuota, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, q := range m.tokenQuotas {
+		if q.TargetType == targetType && q.TargetID == targetID && q.Active {
+			return q, true, nil
+		}
+	}
+	return models.TokenQuota{}, false, nil
+}
+
+func (m *Memory) ListTokenQuotas(_ context.Context, targetType string) ([]models.TokenQuota, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []models.TokenQuota
+	for _, q := range m.tokenQuotas {
+		if targetType != "" && q.TargetType != targetType {
+			continue
+		}
+		out = append(out, q)
+	}
+	return out, nil
+}
+
+func (m *Memory) UpdateTokenQuota(_ context.Context, q models.TokenQuota) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.tokenQuotas[q.QuotaID]; !ok {
+		return ErrNotFound
+	}
+	m.tokenQuotas[q.QuotaID] = q
+	return nil
+}
+
+func (m *Memory) DeleteTokenQuota(_ context.Context, quotaID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.tokenQuotas[quotaID]; !ok {
+		return ErrNotFound
+	}
+	delete(m.tokenQuotas, quotaID)
+	return nil
+}
+
+// ── Token Usage Logs ──
+
+func (m *Memory) AppendTokenUsageLog(_ context.Context, l models.TokenUsageLog) error {
+	if l.LogID == "" {
+		return errors.New("log_id required")
+	}
+	m.mu.Lock()
+	m.tokenUsageLogs = append(m.tokenUsageLogs, l)
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Memory) GetTokenUsageLogs(_ context.Context, filter models.TokenUsageLogFilter) ([]models.TokenUsageLog, int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var filtered []models.TokenUsageLog
+	for _, l := range m.tokenUsageLogs {
+		if filter.AgentID != "" && l.AgentID != filter.AgentID {
+			continue
+		}
+		if filter.FamilyGroupID != "" && l.FamilyGroupID != filter.FamilyGroupID {
+			continue
+		}
+		if filter.ModelName != "" && l.ModelName != filter.ModelName {
+			continue
+		}
+		if filter.FromTime != "" && l.OccurredAt < filter.FromTime {
+			continue
+		}
+		if filter.ToTime != "" && l.OccurredAt >= filter.ToTime {
+			continue
+		}
+		filtered = append(filtered, l)
+	}
+	total := len(filtered)
+
+	// reverse chronological
+	for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
+		filtered[i], filtered[j] = filtered[j], filtered[i]
+	}
+
+	limit := filter.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(filtered) {
+		return nil, total, nil
+	}
+	end := offset + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return filtered[offset:end], total, nil
+}
+
+// ── Token Usage Summary ──
+
+func (m *Memory) GetTokenUsageSummary(_ context.Context, targetType, targetID, period string) ([]models.TokenUsageSummary, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []models.TokenUsageSummary
+	for _, s := range m.usageSummaries {
+		if s.TargetType == targetType && s.TargetID == targetID && s.Period == period {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+func (m *Memory) UpsertTokenUsageSummary(_ context.Context, summary models.TokenUsageSummary) error {
+	summaryID := summary.TargetType + ":" + summary.TargetID + ":" + summary.Period + ":" + summary.DateKey
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, s := range m.usageSummaries {
+		sid := s.TargetType + ":" + s.TargetID + ":" + s.Period + ":" + s.DateKey
+		if sid == summaryID {
+			m.usageSummaries[i].InputTokens += summary.InputTokens
+			m.usageSummaries[i].OutputTokens += summary.OutputTokens
+			m.usageSummaries[i].TotalTokens += summary.TotalTokens
+			m.usageSummaries[i].RequestCount += summary.RequestCount
+			m.usageSummaries[i].CostMillicents += summary.CostMillicents
+			return nil
+		}
+	}
+	m.usageSummaries = append(m.usageSummaries, summary)
+	return nil
+}
+
+// ── Model Prices ──
+
+func (m *Memory) ListModelPrices(_ context.Context) ([]models.ModelPrice, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]models.ModelPrice, 0, len(m.modelPrices))
+	for _, p := range m.modelPrices {
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func (m *Memory) UpsertModelPrice(_ context.Context, p models.ModelPrice) error {
+	m.mu.Lock()
+	m.modelPrices[p.ModelID] = p
+	m.mu.Unlock()
+	return nil
 }

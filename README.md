@@ -399,65 +399,134 @@ curl -X POST http://localhost:8081/api/v1/audit/events \
 - **Go 模块**：`gateway`、`management-server`、`error-handler` 各自独立 `go.mod`，模块路径前缀 `agentshield.dev/agentshield/...`（可按实际仓库 URL 替换）。
 - **Python**：在 `ml-pipeline/` 执行 `pip install -e ".[dev]"`。
 
-## 本地开发环境启动
+## 生产部署 — Windows 主机 + Linux VM
 
-以下命令用于 Windows 宿主机（Docker Desktop + Python 3），从零启动完整项目。
+架构：Windows 主机运行管理端服务（Go API + ClickHouse + OPA + React SPA），Linux VM 运行 agent-runtime（eBPF 探针 + 心跳 + 事件上传），两端通过 Tailscale 组网。
 
-### 1. OPA 策略引擎
-
-```powershell
-docker run -d --name opa -p 8181:8181 -v "C:\Users\Acer\Desktop\AgentShield\security-policy\policies:/policies:ro" openpolicyagent/opa:latest run --server --addr=:8181 /policies
-```
-
-### 2. 数据目录 + 管理服务器
+### Windows 主机启动（管理端）
 
 ```powershell
-docker volume create management_server_data
-docker run -d --name management-server -p 8080:8080 -v management_server_data:/data --env-file deployments/mgmt.env agentshield/management-server:dev
+# 终端 1 — Docker 服务（management-server + OPA + ClickHouse）
+docker compose -f deployments/docker-compose.yml --profile core up -d
+
+# ClickHouse（如 docker compose 不含，单独启动）
+docker run -d --name clickhouse -p 8123:8123 -p 9000:9000 `
+  -e CLICKHOUSE_USER=agentshield -e CLICKHOUSE_PASSWORD=agentshield `
+  -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 `
+  --ulimit nofile=262144:262144 clickhouse/clickhouse-server:latest
+
+# 初始化 ClickHouse 表（仅首次）
+curl -X POST 'http://localhost:8123/?user=agentshield&password=agentshield' `
+  --data "CREATE DATABASE IF NOT EXISTS agentshield"
+curl -X POST 'http://localhost:8123/?user=agentshield&password=agentshield&database=agentshield' `
+  --data-binary @observability/schemas/clickhouse_spans.sql
+
+# 终端 2 — API 代理 + Trace 查询（:8081）
+cd management-server
+$env:CLICKHOUSE_USER="agentshield"; $env:CLICKHOUSE_PASSWORD="agentshield"
+python serve-web.py 8081
+
+# 终端 3 — 前端开发服务器（:5173）
+cd management-server/web
+npm run dev
 ```
 
-> `deployments/mgmt.env` 中配置 SQLite 路径 `/data/agentshield.db`，Docker 重启后数据不丢失。
+浏览器打开 `http://localhost:5173` 访问管理控制台。
 
-### 3. Web 控制台（8081）
+### 构建 agent-runtime 并部署到 VM
+
+```powershell
+# 首次：构建持久镜像 + 编译（~15 min），后续增量 ~2 min
+bash agent-runtime/build-linux.sh
+
+# 打包传输文件
+$deployDir = "$PWD\deploy-pkg"
+New-Item -ItemType Directory -Force $deployDir | Out-Null
+Copy-Item agent-runtime/bin/agent-runtime, agent-runtime/env.vm, `
+  agent-runtime/agent-runtime.service, agent-runtime/bin/agentshield_tracer.py `
+  -Destination $deployDir -Force
+
+# 启动 HTTP 传输服务器
+cd $deployDir
+python -m http.server 9999
+```
+
+### Linux VM 部署（agent-runtime）
 
 ```bash
-cd /c/Users/Acer/Desktop/AgentShield/management-server && python serve-web.py 8081 &
+# 下载（Windows Tailscale IP: 100.123.70.98）
+cd /tmp
+wget http://100.123.70.98:9999/agent-runtime
+wget http://100.123.70.98:9999/env
+wget http://100.123.70.98:9999/agent-runtime.service
+wget http://100.123.70.98:9999/agentshield_tracer.py
+
+# 安装
+sudo mkdir -p /etc/agentshield /var/lib/agentshield/policies
+sudo cp /tmp/agent-runtime /usr/local/bin/agent-runtime
+sudo chmod +x /usr/local/bin/agent-runtime
+sudo cp /tmp/env /etc/agentshield/env
+sudo cp /tmp/agent-runtime.service /etc/systemd/system/agent-runtime.service
+
+# 启动
+sudo systemctl daemon-reload
+sudo systemctl enable agent-runtime
+sudo systemctl start agent-runtime
+
+# 查看日志
+sudo journalctl -u agent-runtime -f
 ```
 
-> 代理 `/api/*` → management-server (8080)，提供 SPA 面板和 ClickHouse 链路查询。
-
-### 4. 文件传输服务器（9999，向 VM 推送文件）
-
-```powershell
-docker run -d --name file-server -p 9999:9999 -v "C:\Users\Acer\Desktop\AgentShield\agent-runtime\bin:/files:ro" python:alpine python -m http.server 9999 --directory /files
-```
-
-> **必须用 PowerShell 启动**，MSYS2/bash 会自动转换路径导致 Docker 挂载失败。
-
-### 5. 更新 tracer 并部署到 VM
+### Hermes AI Agent 集成 SDK Tracer
 
 ```bash
-# 复制到 file-server 挂载目录
-cp -f C:/Users/Acer/Desktop/AgentShield/sdk/python/agentshield_tracer.py C:/Users/Acer/Desktop/AgentShield/agent-runtime/bin/agentshield_tracer.py
+# VM 上安装 tracer
+sudo cp /tmp/agentshield_tracer.py /usr/local/lib/agentshield/agentshield_tracer.py
 
-# VM 上执行
-wget -O /usr/local/lib/agentshield/agentshield_tracer.py http://100.123.70.98:9999/agentshield_tracer.py
-systemctl restart hermes-agent
+# 在 Hermes 启动代码中添加：
+# from agentshield_tracer import init_tracer, wrap_openai
+# init_tracer(agent_id="vm-agent-001", family_group_id="default",
+#             management_url="http://100.123.70.98:8081")
+# client = wrap_openai(openai.OpenAI())
 ```
 
 ### 验证
 
 | 端口 | 服务 | 验证命令 |
 |------|------|----------|
-| 8080 | management-server | `curl http://localhost:8080/healthz` 或 `curl http://localhost:8080/api/v1/healthz` |
-| 8081 | Web 控制台 | `curl -o /dev/null -w "%{http_code}" http://localhost:8081/` |
-| 8181 | OPA | `curl -o /dev/null -w "%{http_code}" http://localhost:8181/` |
-| 9999 | file-server | `curl -o /dev/null -w "%{http_code}" http://localhost:9999/agentshield_tracer.py` |
+| 8080 | management-server | `curl http://localhost:8080/healthz` |
+| 8081 | serve-web.py | `curl http://localhost:8081/api/v1/traces?limit=1` |
+| 8123 | ClickHouse | `curl 'http://localhost:8123/?user=agentshield&password=agentshield' --data 'SELECT 1'` |
+| 8181 | OPA | `curl http://localhost:8181/` |
+| 5173 | React SPA | 浏览器打开 `http://localhost:5173` |
+| VM | agent-runtime | `sudo systemctl status agent-runtime` |
 
-### 一键全部停用
+### 全链路验证
 
 ```bash
-docker rm -f management-server opa file-server 2>/dev/null; pkill -f "serve-web.py"
+# 1. 确认 agent 心跳正常（Dashboard 应显示 online）
+curl http://localhost:8081/api/v1/family-groups-with-agents | python -m json.tool
+
+# 2. 确认 eBPF 安全事件入库
+curl http://localhost:8080/api/v1/audit/events?limit=5
+
+# 3. 确认 LLM trace 上报（需 Hermes 已集成 tracer 并发出 LLM 请求）
+curl http://localhost:8081/api/v1/traces?limit=5
+```
+
+### 全部停用
+
+```powershell
+# Windows
+docker compose -f deployments/docker-compose.yml --profile core down
+docker rm -f clickhouse 2>$null
+Get-Process python -ErrorAction SilentlyContinue | Where-Object {$_.CommandLine -match "serve-web"} | Stop-Process
+Get-Process node -ErrorAction SilentlyContinue | Where-Object {$_.CommandLine -match "vite"} | Stop-Process
+```
+
+```bash
+# VM
+sudo systemctl stop agent-runtime
 ```
 
 ## 推荐数据流（与实现对齐）

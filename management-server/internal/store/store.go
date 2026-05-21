@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"agentshield.dev/agentshield/management-server/internal/models"
 )
@@ -23,6 +24,7 @@ type Store interface {
 	// Agent status management
 	UpdateAgentStatus(ctx context.Context, id string, status string) error
 	UpdateAgentHeartbeat(ctx context.Context, id string) error
+	MarkStaleAgentsOffline(ctx context.Context, timeout time.Duration) (int, error)
 	ListAgentsByStatus(ctx context.Context, status string) ([]models.Agent, error)
 	UpdateAgentRiskScore(ctx context.Context, id string, score float64) error
 
@@ -42,4 +44,27 @@ type Store interface {
 
 	// Dashboard
 	GetDashboardStats(ctx context.Context, familyGroupID string) (models.DashboardStats, error)
+
+	// ── Token Quota ──
+
+	CreateTokenQuota(ctx context.Context, q models.TokenQuota) error
+	GetTokenQuota(ctx context.Context, targetType, targetID string) (models.TokenQuota, bool, error)
+	ListTokenQuotas(ctx context.Context, targetType string) ([]models.TokenQuota, error)
+	UpdateTokenQuota(ctx context.Context, q models.TokenQuota) error
+	DeleteTokenQuota(ctx context.Context, quotaID string) error
+
+	// ── Token Usage Logs ──
+
+	AppendTokenUsageLog(ctx context.Context, log models.TokenUsageLog) error
+	GetTokenUsageLogs(ctx context.Context, filter models.TokenUsageLogFilter) ([]models.TokenUsageLog, int, error)
+
+	// ── Token Usage Summary ──
+
+	GetTokenUsageSummary(ctx context.Context, targetType, targetID, period string) ([]models.TokenUsageSummary, error)
+	UpsertTokenUsageSummary(ctx context.Context, s models.TokenUsageSummary) error
+
+	// ── Model Prices ──
+
+	ListModelPrices(ctx context.Context) ([]models.ModelPrice, error)
+	UpsertModelPrice(ctx context.Context, p models.ModelPrice) error
 }

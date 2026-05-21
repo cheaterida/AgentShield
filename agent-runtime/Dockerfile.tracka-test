@@ -1,0 +1,55 @@
+# Track A 测试/构建镜像 —— 完整 Rust 工具链 + 国内镜像
+# 构建: docker build -t agentshield/tracka-test -f agent-runtime/Dockerfile.tracka-test .
+# 运行: docker run --rm -v "${PWD}:/build" -v agent-shield-cargo:/usr/local/cargo --workdir /build agentshield/tracka-test sh -c '...'
+#
+# 国内加速提示：
+#   Docker Desktop → Settings → Docker Engine → 添加:
+#   "registry-mirrors": ["https://docker.m.daocloud.io"]
+
+FROM rust:1.91-bookworm
+
+# Debian 国内镜像（阿里云）
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
+    sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
+    apt-get update -qq && apt-get install -y -qq musl-tools llvm-dev 2>&1 | tail -1
+
+# Cargo 镜像（USTC sparse）
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+RUN mkdir -p /usr/local/cargo && \
+    echo '[source.crates-io]' > /usr/local/cargo/config.toml && \
+    echo 'replace-with = "ustc"' >> /usr/local/cargo/config.toml && \
+    echo '[source.ustc]' >> /usr/local/cargo/config.toml && \
+    echo 'registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"' >> /usr/local/cargo/config.toml
+
+# Rustup 镜像（USTC）
+ENV RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
+ENV RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
+
+# 预装常用 target
+RUN rustup target add x86_64-unknown-linux-musl 2>&1 | tail -1
+
+# 预拉取依赖（Docker layer 缓存）
+WORKDIR /build
+COPY Cargo.toml Cargo.lock* ./
+COPY agent-runtime/Cargo.toml agent-runtime/
+COPY ebpf-probes/agentshield-ebpf/Cargo.toml ebpf-probes/agentshield-ebpf/
+COPY ebpf-probes/agentshield-ebpf-common/Cargo.toml ebpf-probes/agentshield-ebpf-common/
+COPY ebpf-probes/agentshield-loader/Cargo.toml ebpf-probes/agentshield-loader/
+
+RUN mkdir -p agent-runtime/src/checkpoint && \
+    echo 'pub mod journal; pub mod manifest; pub mod recovery; pub mod workspace; use thiserror::Error; #[derive(Error,Debug)] pub enum CheckpointError { #[error("{0}")] Io(#[from] std::io::Error), #[error("{0}")] Serialize(String), #[error("{0}")] Deserialize(String), #[error("{0}")] NotFound(String), #[error("{0}")] Manifest(String), #[error("{0}")] Workspace(String), #[error("{0}")] Recovery(String), #[error("{0}")] Prune(String) } pub struct CheckpointManager; impl CheckpointManager { pub fn dummy() {} }' > agent-runtime/src/checkpoint/mod.rs && \
+    touch agent-runtime/src/checkpoint/journal.rs && \
+    touch agent-runtime/src/checkpoint/manifest.rs && \
+    touch agent-runtime/src/checkpoint/workspace.rs && \
+    touch agent-runtime/src/checkpoint/recovery.rs && \
+    echo 'fn main() {}' > agent-runtime/src/main.rs && \
+    echo '' > ebpf-probes/agentshield-ebpf/src/lib.rs && \
+    echo '' > ebpf-probes/agentshield-ebpf-common/src/lib.rs && \
+    echo 'fn main() {}' > ebpf-probes/agentshield-loader/src/main.rs
+
+RUN cargo fetch 2>&1 | tail -5
+
+# 清除占位文件
+RUN rm -rf agent-runtime/src ebpf-probes/agentshield-ebpf/src ebpf-probes/agentshield-ebpf-common/src ebpf-probes/agentshield-loader/src
+
+CMD ["cargo", "build", "-p", "agent-runtime"]
