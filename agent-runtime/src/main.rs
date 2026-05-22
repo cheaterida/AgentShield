@@ -216,20 +216,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // ── 5b. 心跳任务（含 checkpoint 集成） ──
+    // ── 5b. 心跳任务（含 supervisor + checkpoint 集成） ──
     let mut hb_task = heartbeat::HeartbeatTask::new(
         client.clone(),
         cfg.heartbeat_interval_secs,
         probe_manager.clone(),
         event_buffer.clone(),
         policy_cache.clone(),
-    );
+    )
+    .with_supervisor(supervisor.clone());
     #[cfg(feature = "checkpoint")]
-    {
-        if let Some(ref cm) = checkpoint_mgr {
-            hb_task = hb_task.with_checkpoint_manager(cm.clone());
-        }
-        hb_task = hb_task.with_supervisor(supervisor.clone());
+    if let Some(ref cm) = checkpoint_mgr {
+        hb_task = hb_task.with_checkpoint_manager(cm.clone());
     }
     let hb_handle = tokio::spawn(hb_task.run());
 

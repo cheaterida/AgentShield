@@ -5,6 +5,7 @@ use crate::client::ManagementClient;
 use crate::event_buffer::EventBuffer;
 use crate::policy_cache::PolicyCache;
 use crate::probe_manager::ProbeManager;
+use crate::supervisor::Supervisor;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -12,8 +13,6 @@ use sysinfo::{Pid, System};
 
 #[cfg(feature = "checkpoint")]
 use crate::checkpoint::CheckpointManager;
-#[cfg(feature = "checkpoint")]
-use crate::supervisor::Supervisor;
 
 pub struct HeartbeatTask {
     client: ManagementClient,
@@ -24,10 +23,9 @@ pub struct HeartbeatTask {
     /// Cached sysinfo handle + own PID for CPU/mem collection.
     sys: Mutex<System>,
     own_pid: Pid,
+    supervisor: Option<Arc<Supervisor>>,
     #[cfg(feature = "checkpoint")]
     checkpoint_manager: Option<Arc<CheckpointManager>>,
-    #[cfg(feature = "checkpoint")]
-    supervisor: Option<Arc<Supervisor>>,
 }
 
 impl HeartbeatTask {
@@ -47,10 +45,9 @@ impl HeartbeatTask {
             policy_cache,
             sys: Mutex::new(System::new_all()),
             own_pid,
+            supervisor: None,
             #[cfg(feature = "checkpoint")]
             checkpoint_manager: None,
-            #[cfg(feature = "checkpoint")]
-            supervisor: None,
         }
     }
 
@@ -60,7 +57,6 @@ impl HeartbeatTask {
         self
     }
 
-    #[cfg(feature = "checkpoint")]
     pub fn with_supervisor(mut self, sup: Arc<Supervisor>) -> Self {
         self.supervisor = Some(sup);
         self
@@ -107,11 +103,26 @@ impl HeartbeatTask {
     fn handle_suggested_action(&self, resp: &crate::client::HeartbeatResp) {
         let action = resp.suggested_action.trim();
 
-        if action == "isolate" {
-            tracing::warn!(
-                agent_id = %self.client.agent_id,
-                "management-server requested isolation"
-            );
+        match action {
+            "isolate" => {
+                tracing::warn!(
+                    agent_id = %self.client.agent_id,
+                    "management-server requested isolation"
+                );
+            }
+            "quota_exceeded" => {
+                tracing::error!(
+                    agent_id = %self.client.agent_id,
+                    quota_status = %resp.quota_status,
+                    usage = resp.token_usage_today,
+                    limit = resp.token_quota_daily,
+                    "token quota exceeded — stopping hermes"
+                );
+                if let Some(ref sup) = self.supervisor {
+                    sup.stop();
+                }
+            }
+            _ => {}
         }
 
         #[cfg(feature = "checkpoint")]

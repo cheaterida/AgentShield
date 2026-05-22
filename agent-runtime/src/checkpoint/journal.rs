@@ -51,7 +51,7 @@ pub struct JournalEntry {
 
 /// 将 JournalEntry 序列化为 MessagePack 字节。
 pub fn serialize(entry: &JournalEntry) -> Result<Vec<u8>, CheckpointError> {
-    rmp_serde::to_vec(entry).map_err(|e| CheckpointError::Serialize(e.to_string()))
+    rmp_serde::to_vec_named(entry).map_err(|e| CheckpointError::Serialize(e.to_string()))
 }
 
 /// 从 MessagePack 字节反序列化为 JournalEntry。

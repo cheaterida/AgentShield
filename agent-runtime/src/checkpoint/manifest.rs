@@ -145,6 +145,18 @@ pub fn backup_files(
 
     fs::create_dir_all(clean_dir)?;
 
+    // 备份新增的文件（首次 checkpoint 时全部文件都标记为 created）
+    for path in &diff.created {
+        let src = workspace_root.join(path);
+        let dst = clean_dir.join(path);
+        if src.exists() {
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&src, &dst)?;
+        }
+    }
+
     // 备份被修改的文件（当前版本 → clean_copies）
     for path in &diff.modified {
         let src = workspace_root.join(path);

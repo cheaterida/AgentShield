@@ -84,25 +84,25 @@ impl CheckpointManager {
     ///
     /// 返回 checkpoint_id。
     pub fn create(&self, entry: &JournalEntry) -> Result<String, CheckpointError> {
+        // 1. 在写入任何文件之前，先获取前一个 checkpoint 的 manifest 用于 diff
+        let current_manifest = manifest::compute_manifest(&self.config.workspace_dir)?;
+        let prev_manifest = self.load_latest_manifest()?;
+
         let ckpt_dir = self.checkpoint_dir.join(&entry.checkpoint_id);
         fs::create_dir_all(&ckpt_dir)?;
 
-        // 1. 保存 journal
+        // 2. 保存 journal
         let journal_path = ckpt_dir.join("journal.msgpack");
         journal::save_to_file(entry, &journal_path)?;
 
-        // 2. 计算并保存 manifest
-        let current_manifest = manifest::compute_manifest(&self.config.workspace_dir)?;
+        // 3. 保存 manifest
         let manifest_path = ckpt_dir.join("file_manifest.json");
         let manifest_json = serde_json::to_string_pretty(&current_manifest)
             .map_err(|e| CheckpointError::Serialize(e.to_string()))?;
         fs::write(&manifest_path, manifest_json)?;
 
-        // 3. 备份文件（与前一个 checkpoint 对比）
+        // 4. 备份文件（与前一个 checkpoint 对比）
         let clean_dir = ckpt_dir.join("clean_copies");
-        // 对当前已存在的文件做备份（与空 manifest 对比意味着全部备份）
-        // 实际场景中应与前一个 checkpoint 对比；初次则全量备份
-        let prev_manifest = self.load_latest_manifest()?;
         let diff = manifest::diff(&current_manifest, &prev_manifest);
         manifest::backup_files(&current_manifest, &diff, &clean_dir)?;
 
