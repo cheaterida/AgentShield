@@ -52,6 +52,12 @@ pub struct HeartbeatResp {
     pub acknowledged: bool,
     pub latest_policy_version: String,
     pub suggested_action: String,
+    #[serde(default)]
+    pub quota_status: String,
+    #[serde(default)]
+    pub token_usage_today: i64,
+    #[serde(default)]
+    pub token_quota_daily: i64,
 }
 
 #[derive(Serialize)]
@@ -226,6 +232,9 @@ impl ManagementClient {
                 acknowledged: false,
                 latest_policy_version: String::new(),
                 suggested_action: "ok".into(),
+                quota_status: String::new(),
+                token_usage_today: 0,
+                token_quota_daily: 0,
             });
         }
 

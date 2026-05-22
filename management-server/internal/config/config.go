@@ -16,8 +16,11 @@ type Config struct {
 	RedisPassword  string
 	RedisDB        int
 	CacheTTL       time.Duration
-	OPABaseURL     string
-	MLPipelineURL  string
+	OPABaseURL              string
+	OPAMode                 string
+	OPAAllowBuiltinFallback bool
+	OPARegoPath             string
+	MLPipelineURL           string
 	AuditBufferCap       int
 	LogLevel             string
 	TokenQuotaEnabled    bool
@@ -37,8 +40,11 @@ func Load() Config {
 		RedisPassword:  getenv("AGENTSHIELD_REDIS_PASSWORD", ""),
 		RedisDB:        getenvInt("AGENTSHIELD_REDIS_DB", 0),
 		CacheTTL:       getenvDur("AGENTSHIELD_CACHE_TTL", 5*time.Minute),
-		OPABaseURL:     getenv("AGENTSHIELD_OPA_BASE_URL", "http://localhost:8181"),
-		MLPipelineURL:  getenv("AGENTSHIELD_ML_PIPELINE_URL", ""),
+		OPABaseURL:              getenv("AGENTSHIELD_OPA_BASE_URL", "http://localhost:8181"),
+		OPAMode:                 getenv("AGENTSHIELD_OPA_MODE", "remote"),
+		OPAAllowBuiltinFallback: getenvBool("AGENTSHIELD_OPA_ALLOW_BUILTIN_FALLBACK", false),
+		OPARegoPath:             getenv("AGENTSHIELD_OPA_REGO_PATH", ""),
+		MLPipelineURL:           getenv("AGENTSHIELD_ML_PIPELINE_URL", ""),
 		AuditBufferCap: getenvInt("AGENTSHIELD_AUDIT_BUFFER_CAP", 10000),
 		LogLevel:       getenv("AGENTSHIELD_LOG_LEVEL", "info"),
 

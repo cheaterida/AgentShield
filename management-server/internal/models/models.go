@@ -206,3 +206,30 @@ type TokenUsageLogFilter struct {
 	Limit         int
 	Offset        int
 }
+
+// ── Approval (Track B3) ──
+
+type ApprovalRequest struct {
+	RequestID     string            `json:"request_id"`
+	AgentID       string            `json:"agent_id"`
+	FamilyGroupID string            `json:"family_group_id"`
+	Action        string            `json:"action"`
+	ResourceRef   string            `json:"resource_ref"`
+	RiskScore     float64           `json:"risk_score"`
+	Tier          string            `json:"tier"`   // department|security|ciso
+	Status        string            `json:"status"` // pending|approved|denied|expired
+	RequestedBy   string            `json:"requested_by"`
+	ApprovedBy    string            `json:"approved_by,omitempty"`
+	ApprovedAt    *time.Time        `json:"approved_at,omitempty"`
+	ExpiresAt     *time.Time        `json:"expires_at,omitempty"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
+	CreatedAt     time.Time         `json:"created_at"`
+}
+
+type ApprovalFilter struct {
+	FamilyGroupID string
+	Status        string
+	Tier          string
+	Limit         int
+	Offset        int
+}

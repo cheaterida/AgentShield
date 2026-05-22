@@ -89,8 +89,25 @@ func main() {
 	polDist := policy.NewDistributor(st, logger)
 
 	// OPA 策略引擎客户端
-	opaClient := policy.NewOPAClient(cfg.OPABaseURL)
-	logger.Info("opa client ready", "base_url", cfg.OPABaseURL)
+	var regoContent string
+	if cfg.OPAMode == "builtin" || cfg.OPAAllowBuiltinFallback {
+		if cfg.OPARegoPath != "" {
+			if data, err := os.ReadFile(cfg.OPARegoPath); err == nil {
+				regoContent = string(data)
+			} else {
+				logger.Warn("failed to load rego file, builtin mode will be unavailable", "path", cfg.OPARegoPath, "err", err)
+			}
+		} else {
+			logger.Warn("builtin mode or fallback enabled but AGENTSHIELD_OPA_REGO_PATH is not set")
+		}
+	}
+	opaClient := policy.NewOPAClientWithConfig(policy.OPAConfig{
+		BaseURL:              cfg.OPABaseURL,
+		Mode:                 policy.OPAMode(cfg.OPAMode),
+		RegoContent:          regoContent,
+		AllowBuiltinFallback: cfg.OPAAllowBuiltinFallback,
+	})
+	logger.Info("opa client ready", "base_url", cfg.OPABaseURL, "mode", cfg.OPAMode, "fallback", cfg.OPAAllowBuiltinFallback)
 
 	// ── Token 算力配额管理（可选）──
 	var quotaMgr *token_quota.Manager

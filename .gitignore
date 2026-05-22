@@ -52,3 +52,18 @@ ml-pipeline/data/
 
 # Egg info
 ml-pipeline/src/agentshield_ml.egg-info/
+
+# Reference projects (not part of this build)
+agent-governance-toolkit-main/
+
+# OPA binary (downloaded CLI tool)
+opa.exe
+
+# Compiled binaries
+management-server/server.exe
+
+# Temp / scratch artifacts
+management-server/-w
+audit-output/
+deploy-pkg/
+tracks/

@@ -38,10 +38,11 @@ type Memory struct {
 	alerts       []models.RiskAlert
 	auditCap     int
 
-	tokenQuotas     map[string]models.TokenQuota
-	tokenUsageLogs  []models.TokenUsageLog
-	usageSummaries  []models.TokenUsageSummary
-	modelPrices     map[string]models.ModelPrice
+	tokenQuotas       map[string]models.TokenQuota
+	tokenUsageLogs    []models.TokenUsageLog
+	usageSummaries    []models.TokenUsageSummary
+	modelPrices       map[string]models.ModelPrice
+	approvalRequests  map[string]models.ApprovalRequest
 }
 
 func NewMemory(auditCap int) *Memory {
@@ -52,8 +53,9 @@ func NewMemory(auditCap int) *Memory {
 		agents:          make(map[string]models.Agent),
 		familyGroups:    make(map[string]models.FamilyGroup),
 		auditCap:        auditCap,
-		tokenQuotas:     make(map[string]models.TokenQuota),
-		modelPrices:     make(map[string]models.ModelPrice),
+		tokenQuotas:      make(map[string]models.TokenQuota),
+		modelPrices:      make(map[string]models.ModelPrice),
+		approvalRequests: make(map[string]models.ApprovalRequest),
 	}
 }
 
@@ -662,5 +664,74 @@ func (m *Memory) UpsertModelPrice(_ context.Context, p models.ModelPrice) error 
 	m.mu.Lock()
 	m.modelPrices[p.ModelID] = p
 	m.mu.Unlock()
+	return nil
+}
+
+// ── Approval Requests (Track B3) ──
+
+func (m *Memory) CreateApprovalRequest(_ context.Context, req models.ApprovalRequest) error {
+	if req.RequestID == "" {
+		return errors.New("request_id required")
+	}
+	req.CreatedAt = time.Now().UTC()
+	m.mu.Lock()
+	m.approvalRequests[req.RequestID] = req
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Memory) GetApprovalRequest(_ context.Context, requestID string) (models.ApprovalRequest, bool, error) {
+	m.mu.RLock()
+	req, ok := m.approvalRequests[requestID]
+	m.mu.RUnlock()
+	if !ok {
+		debugLog("GetApprovalRequest not found", "request_id", requestID, "store", "memory")
+	}
+	return req, ok, nil
+}
+
+func (m *Memory) ListApprovalRequests(_ context.Context, filter models.ApprovalFilter) ([]models.ApprovalRequest, int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var filtered []models.ApprovalRequest
+	for _, req := range m.approvalRequests {
+		if filter.FamilyGroupID != "" && req.FamilyGroupID != filter.FamilyGroupID {
+			continue
+		}
+		if filter.Status != "" && req.Status != filter.Status {
+			continue
+		}
+		if filter.Tier != "" && req.Tier != filter.Tier {
+			continue
+		}
+		filtered = append(filtered, req)
+	}
+	total := len(filtered)
+	sort.Slice(filtered, func(i, j int) bool { return filtered[i].CreatedAt.After(filtered[j].CreatedAt) })
+	limit := filter.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(filtered) {
+		return nil, total, nil
+	}
+	end := offset + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return filtered[offset:end], total, nil
+}
+
+func (m *Memory) UpdateApprovalRequest(_ context.Context, req models.ApprovalRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.approvalRequests[req.RequestID]; !ok {
+		return ErrNotFound
+	}
+	m.approvalRequests[req.RequestID] = req
 	return nil
 }

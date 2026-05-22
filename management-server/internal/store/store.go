@@ -67,4 +67,11 @@ type Store interface {
 
 	ListModelPrices(ctx context.Context) ([]models.ModelPrice, error)
 	UpsertModelPrice(ctx context.Context, p models.ModelPrice) error
+
+	// ── Approval Requests (Track B3) ──
+
+	CreateApprovalRequest(ctx context.Context, req models.ApprovalRequest) error
+	GetApprovalRequest(ctx context.Context, requestID string) (models.ApprovalRequest, bool, error)
+	ListApprovalRequests(ctx context.Context, filter models.ApprovalFilter) ([]models.ApprovalRequest, int, error)
+	UpdateApprovalRequest(ctx context.Context, req models.ApprovalRequest) error
 }

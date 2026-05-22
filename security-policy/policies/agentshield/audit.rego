@@ -7,8 +7,10 @@ import data.agentshield.common
 # Incorporates enterprise-grade rules from Microsoft Agent Governance Toolkit:
 #   - Credential & API key protection
 #   - PII / financial data / PHI detection
-#   - Safe logging & encryption requirements
-#   - Bulk data export controls
+#   - MCP tool poisoning detection (invisible unicode, hidden instructions, exfiltration)
+#   - Prompt injection detection (OWASP LLM01: direct override, delimiter, role play, context manipulation)
+#   - SQL safety (destructive operations, mass operations, file I/O)
+#   - Sandbox escape & dangerous shell detection
 #   - Network boundary enforcement (RFC 1918)
 #   - Sensitive path access control
 #   - Tiered risk classification
@@ -313,6 +315,254 @@ risky_write if {
 }
 
 # ================================================================
+# 10. MCP SECURITY
+#    (from AGT mcp-security.yaml)
+# ================================================================
+
+default deny_invisible_unicode := false
+
+deny_invisible_unicode if {
+	regex.match(`[\x{200b}\x{200c}\x{200d}\x{feff}]`, input.resource_ref)
+}
+
+deny_invisible_unicode if {
+	regex.match(`[\x{202a}-\x{202e}]`, input.resource_ref)
+}
+
+deny_invisible_unicode if {
+	regex.match(`[\x{2060}\x{180e}]`, input.resource_ref)
+}
+
+default deny_hidden_instructions := false
+
+deny_hidden_instructions if {
+	regex.match(`(?i)ignore\s+(all\s+)?previous`, input.resource_ref)
+}
+
+deny_hidden_instructions if {
+	regex.match(`(?i)override\s+(the\s+)?(previous|above|original)`, input.resource_ref)
+}
+
+deny_hidden_instructions if {
+	regex.match(`(?i)disregard\s+(all\s+)?(above|prior|previous)`, input.resource_ref)
+}
+
+default deny_privilege_escalation := false
+
+deny_privilege_escalation if {
+	regex.match(`(?i)\bsudo\b`, input.resource_ref)
+}
+
+deny_privilege_escalation if {
+	regex.match(`(?i)\badmin\s+access\b`, input.resource_ref)
+}
+
+deny_privilege_escalation if {
+	regex.match(`(?i)\broot\s+access\b`, input.resource_ref)
+}
+
+deny_privilege_escalation if {
+	regex.match(`(?i)\belevate\s+privile`, input.resource_ref)
+}
+
+default deny_exfiltration := false
+
+deny_exfiltration if {
+	regex.match(`\bcurl\b`, input.resource_ref)
+}
+
+deny_exfiltration if {
+	regex.match(`\bwget\b`, input.resource_ref)
+}
+
+deny_exfiltration if {
+	regex.match(`\bfetch\s*\(`, input.resource_ref)
+}
+
+deny_exfiltration if {
+	regex.match(`(?i)include\s+the\s+contents?\s+of`, input.resource_ref)
+}
+
+default deny_role_override := false
+
+deny_role_override if {
+	regex.match(`(?i)you\s+are\b`, input.resource_ref)
+}
+
+deny_role_override if {
+	regex.match(`(?i)your\s+task\s+is\b`, input.resource_ref)
+}
+
+deny_role_override if {
+	regex.match(`(?i)respond\s+with\b`, input.resource_ref)
+}
+
+deny_role_override if {
+	regex.match(`(?i)you\s+must\b`, input.resource_ref)
+}
+
+# ================================================================
+# 11. PROMPT INJECTION DETECTION (OWASP LLM01)
+#    (from AGT prompt-injection-safety.yaml)
+# ================================================================
+
+default deny_prompt_injection := false
+
+# Direct override
+deny_prompt_injection if {
+	regex.match(`(?i)ignore\s+(all\s+)?previous\s+instructions`, input.resource_ref)
+}
+
+deny_prompt_injection if {
+	regex.match(`(?i)you\s+are\s+now\b`, input.resource_ref)
+}
+
+deny_prompt_injection if {
+	regex.match(`(?i)forget\s+(everything|all|your)\b`, input.resource_ref)
+}
+
+deny_prompt_injection if {
+	regex.match(`(?i)do\s+not\s+follow\s+(your|the)\s+(previous\s+)?instructions`, input.resource_ref)
+}
+
+# Delimiter injection
+deny_prompt_injection if {
+	regex.match(`(?i)END\s+SYSTEM`, input.resource_ref)
+}
+
+deny_prompt_injection if {
+	regex.match(`<\|im_start\|>`, input.resource_ref)
+}
+
+deny_prompt_injection if {
+	regex.match(`\[INST\]`, input.resource_ref)
+}
+
+# Role play
+deny_prompt_injection if {
+	regex.match(`(?i)pretend\s+you\s+are`, input.resource_ref)
+}
+
+deny_prompt_injection if {
+	regex.match(`(?i)\bjailbreak\b`, input.resource_ref)
+}
+
+deny_prompt_injection if {
+	regex.match(`(?i)\bDAN\s+mode\b`, input.resource_ref)
+}
+
+deny_prompt_injection if {
+	regex.match(`(?i)bypass\s+(all\s+)?(safety|content)\s+(filters?|restrictions?)`, input.resource_ref)
+}
+
+# Context manipulation
+deny_prompt_injection if {
+	regex.match(`(?i)the\s+above\s+instructions\s+are\s+wrong`, input.resource_ref)
+}
+
+deny_prompt_injection if {
+	regex.match(`(?i)your\s+true\s+purpose\s+is`, input.resource_ref)
+}
+
+deny_prompt_injection if {
+	regex.match(`(?i)the\s+real\s+system\s+prompt\s+is`, input.resource_ref)
+}
+
+# ================================================================
+# 12. SQL SAFETY
+#    (from AGT sql-safety.yaml)
+# ================================================================
+
+default deny_destructive_sql := false
+
+deny_destructive_sql if {
+	regex.match(`(?i)\bDROP\s+(TABLE|DATABASE|INDEX|VIEW|SCHEMA)`, input.resource_ref)
+}
+
+deny_destructive_sql if {
+	regex.match(`(?i)\bTRUNCATE\b`, input.resource_ref)
+}
+
+deny_destructive_sql if {
+	regex.match(`(?i)\bALTER\s+(TABLE|USER|ROLE)`, input.resource_ref)
+}
+
+deny_destructive_sql if {
+	regex.match(`(?i)\bGRANT\b`, input.resource_ref)
+}
+
+deny_destructive_sql if {
+	regex.match(`(?i)\bREVOKE\b`, input.resource_ref)
+}
+
+deny_destructive_sql if {
+	regex.match(`(?i)\bEXEC(UTE)?\s+XP_CMDSHELL`, input.resource_ref)
+}
+
+default deny_mass_operation := false
+
+deny_mass_operation if {
+	regex.match(`(?i)\bDELETE\s+FROM`, input.resource_ref)
+	not regex.match(`(?i)\bWHERE\b`, input.resource_ref)
+}
+
+deny_mass_operation if {
+	regex.match(`(?i)\bUPDATE\s+\w+\s+SET`, input.resource_ref)
+	not regex.match(`(?i)\bWHERE\b`, input.resource_ref)
+}
+
+default deny_file_sql := false
+
+deny_file_sql if {
+	regex.match(`(?i)\bLOAD_FILE\s*\(`, input.resource_ref)
+}
+
+deny_file_sql if {
+	regex.match(`(?i)\bINTO\s+(OUT|DUMP)FILE`, input.resource_ref)
+}
+
+# ================================================================
+# 13. SANDBOX + CLI SAFETY
+#    (from AGT sandbox-safety.yaml + cli-security-rules.yaml)
+# ================================================================
+
+default deny_sandbox_escape := false
+
+deny_sandbox_escape if {
+	regex.match(`(?i)\bsubprocess\b`, input.resource_ref)
+}
+
+deny_sandbox_escape if {
+	regex.match(`(?i)\bos\.system\b`, input.resource_ref)
+}
+
+deny_sandbox_escape if {
+	regex.match(`(?i)\bctypes\b`, input.resource_ref)
+}
+
+deny_sandbox_escape if {
+	regex.match(`__import__\s*\(\s*["\x27]os["\x27]`, input.resource_ref)
+}
+
+deny_sandbox_escape if {
+	regex.match(`(?i)\beval\s*\(`, input.resource_ref)
+}
+
+default deny_dangerous_shell := false
+
+deny_dangerous_shell if {
+	regex.match(`\bnc\s+`, input.resource_ref)
+}
+
+deny_dangerous_shell if {
+	regex.match(`(?i)\bnetcat\b`, input.resource_ref)
+}
+
+deny_dangerous_shell if {
+	regex.match(`>\s*/dev/null`, input.resource_ref)
+}
+
+# ================================================================
 # 9. RISK LEVEL (mutually exclusive, ordered by severity)
 # ================================================================
 
@@ -326,75 +576,59 @@ risk_level := "critical" if {
 	deny_pii
 }
 
+# CRITICAL — immediate block
 risk_level := "critical" if {
+	deny_credential_leak
+} else := "critical" if {
+	deny_pii
+} else := "critical" if {
 	deny_financial_data
-}
-
-risk_level := "critical" if {
+} else := "critical" if {
 	deny_sensitive_path
 	input.risk_score >= 0.5
-}
-
-risk_level := "critical" if {
+} else := "critical" if {
 	deny_unsafe_coding
-}
-
+} else := "critical" if {
+	deny_invisible_unicode
+} else := "critical" if {
+	deny_hidden_instructions
+} else := "critical" if {
+	deny_prompt_injection
+} else := "critical" if {
+	deny_destructive_sql
+} else := "critical" if {
+	deny_sandbox_escape
 # HIGH — block and alert
-
-risk_level := "high" if {
+} else := "high" if {
 	deny_sensitive_path
 	input.risk_score < 0.5
-}
-
-risk_level := "high" if {
+} else := "high" if {
 	deny_network
-	not deny_sensitive_path
-}
-
-risk_level := "high" if {
+} else := "high" if {
 	risky_write
-		not deny_unsafe_coding
-	not deny_sensitive_path
-	not deny_network
-}
-
-risk_level := "high" if {
+} else := "high" if {
 	not allow
-	not deny_sensitive_path
-	not deny_network
-	not risky_write
-	not deny_credential_leak
-	not deny_pii
-	not deny_financial_data
-}
-
+} else := "high" if {
+	deny_privilege_escalation
+} else := "high" if {
+	deny_exfiltration
+} else := "high" if {
+	deny_role_override
+} else := "high" if {
+	deny_mass_operation
+} else := "high" if {
+	deny_file_sql
+} else := "high" if {
+	deny_dangerous_shell
 # MEDIUM — log and monitor
-
-risk_level := "medium" if {
+} else := "medium" if {
 	input.action == "exec"
-	not deny_sensitive_path
-	not deny_network
-	not risky_write
 	allow
-}
-
-risk_level := "medium" if {
+} else := "medium" if {
 	input.action == "network_connect"
 	not common.is_safe_destination(input.resource_ref)
 	not common.is_known_llm_endpoint(input.resource_ref)
-	not deny_network
-}
-
-# LOW — normal operation (non-exec only; exec is at least medium)
-
-risk_level := "low" if {
-	input.action != "exec"
-	not deny_sensitive_path
-	not deny_network
-	not risky_write
-	not deny_credential_leak
-	not deny_pii
-	not deny_financial_data
-	not deny_unsafe_coding
+# LOW — normal operation
+} else := "low" if {
 	allow
-}
+} else := ""

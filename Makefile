@@ -52,6 +52,9 @@ test-agent-runtime:
 test-frontend:
 	cd management-server/web && npm run test -- --run 2>/dev/null || echo "frontend tests skipped"
 
+test-policy:
+	opa test security-policy/policies/ -v
+
 test: test-management test-agent-runtime
 
 # ── Dev servers ──

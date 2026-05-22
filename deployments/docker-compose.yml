@@ -50,6 +50,8 @@ services:
       AGENTSHIELD_DB_DRIVER: "sqlite"
       AGENTSHIELD_SQLITE_PATH: "/data/agentshield.db"
       AGENTSHIELD_OPA_BASE_URL: "http://opa:8181"
+      AGENTSHIELD_OPA_MODE: "remote"
+      AGENTSHIELD_OPA_ALLOW_BUILTIN_FALLBACK: "false"
       AGENTSHIELD_ML_PIPELINE_URL: "http://ml-pipeline:8090"
       AGENTSHIELD_REDIS_ADDR: "redis:6379"
       AGENTSHIELD_REDIS_PASSWORD: ""

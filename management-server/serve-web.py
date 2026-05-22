@@ -367,6 +367,23 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(f'{{"error":"proxy failed: {e}"}}'.encode())
 
+    def _forward_to_go(self, payload: dict, agent_id: str, family_group_id: str):
+        """Forward span payload to Go backend for token quota recording + audit event creation."""
+        import requests as _requests
+        try:
+            _requests.post(
+                f"{API_BACKEND}/api/v1/spans",
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-AgentShield-Agent-ID": agent_id,
+                    "X-AgentShield-Family-Group-ID": family_group_id,
+                },
+                timeout=10,
+            )
+        except Exception:
+            pass  # best-effort: ClickHouse insert already succeeded
+
     def _ingest_spans(self):
         """Ingest spans directly into AgentShield ClickHouse (replaces Langtrace Collector).
 
@@ -413,6 +430,8 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
 
         try:
             n = ch_insert_spans(spans)
+            # Forward to Go backend for token quota recording + audit event creation
+            self._forward_to_go(payload, agent_id, family_group_id)
             self._json_resp(202, {"accepted": n})
         except Exception as e:
             self._json_resp(500, {"error": f"insert failed: {e}"})

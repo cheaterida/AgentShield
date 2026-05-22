@@ -45,7 +45,7 @@ func NewSQLite(dsn string) (*SQLiteStore, error) {
 func (s *SQLiteStore) Close() error { return s.db.Close() }
 
 func (s *SQLiteStore) runMigrations() error {
-	for _, name := range []string{"migrations/001_init.sql", "migrations/002_add_policy_metadata.sql", "migrations/003_add_token_management.sql"} {
+	for _, name := range []string{"migrations/001_init.sql", "migrations/002_add_policy_metadata.sql", "migrations/003_add_token_management.sql", "migrations/004_add_approval_requests.sql"} {
 		data, err := migrations.ReadFile(name)
 		if err != nil {
 			return err
@@ -872,4 +872,110 @@ func parseTimePtr(s *string) *time.Time {
 		return nil
 	}
 	return &t
+}
+
+// ── Approval Requests (Track B3) ──
+
+func (s *SQLiteStore) CreateApprovalRequest(_ context.Context, req models.ApprovalRequest) error {
+	meta, _ := json.Marshal(req.Metadata)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.Exec(
+		`INSERT INTO approval_requests (request_id, agent_id, family_group_id, action, resource_ref, risk_score, tier, status, requested_by, approved_by, approved_at, expires_at, metadata_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		req.RequestID, req.AgentID, req.FamilyGroupID, req.Action, req.ResourceRef, req.RiskScore, req.Tier, req.Status, req.RequestedBy, req.ApprovedBy, formatTime(req.ApprovedAt), formatTime(req.ExpiresAt), string(meta), now,
+	)
+	if err == nil {
+		debugLog("CreateApprovalRequest", "request_id", req.RequestID, "tier", req.Tier, "store", "sqlite")
+	}
+	return err
+}
+
+func (s *SQLiteStore) GetApprovalRequest(_ context.Context, requestID string) (models.ApprovalRequest, bool, error) {
+	var req models.ApprovalRequest
+	var metaStr string
+	var ca string
+	var approvedAt, expiresAt *string
+	err := s.db.QueryRow(
+		`SELECT request_id, agent_id, family_group_id, action, resource_ref, risk_score, tier, status, requested_by, COALESCE(approved_by,''), approved_at, expires_at, COALESCE(metadata_json,'{}'), created_at FROM approval_requests WHERE request_id=?`,
+		requestID,
+	).Scan(&req.RequestID, &req.AgentID, &req.FamilyGroupID, &req.Action, &req.ResourceRef, &req.RiskScore, &req.Tier, &req.Status, &req.RequestedBy, &req.ApprovedBy, &approvedAt, &expiresAt, &metaStr, &ca)
+	if errors.Is(err, sql.ErrNoRows) {
+		debugLog("GetApprovalRequest not found", "request_id", requestID, "store", "sqlite")
+		return req, false, nil
+	}
+	if err != nil {
+		return req, false, err
+	}
+	req.ApprovedAt = parseTimePtr(approvedAt)
+	req.ExpiresAt = parseTimePtr(expiresAt)
+	req.CreatedAt, _ = time.Parse(time.RFC3339Nano, ca)
+	if metaStr != "" && metaStr != "{}" {
+		_ = json.Unmarshal([]byte(metaStr), &req.Metadata)
+	}
+	return req, true, nil
+}
+
+func (s *SQLiteStore) ListApprovalRequests(_ context.Context, filter models.ApprovalFilter) ([]models.ApprovalRequest, int, error) {
+	where := []string{"1=1"}
+	args := []any{}
+	if filter.FamilyGroupID != "" {
+		where = append(where, "family_group_id=?")
+		args = append(args, filter.FamilyGroupID)
+	}
+	if filter.Status != "" {
+		where = append(where, "status=?")
+		args = append(args, filter.Status)
+	}
+	if filter.Tier != "" {
+		where = append(where, "tier=?")
+		args = append(args, filter.Tier)
+	}
+
+	var total int
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM approval_requests WHERE %s", strings.Join(where, " AND "))
+	if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	limit := filter.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	query := fmt.Sprintf("SELECT request_id, agent_id, family_group_id, action, resource_ref, risk_score, tier, status, requested_by, COALESCE(approved_by,''), approved_at, expires_at, COALESCE(metadata_json,'{}'), created_at FROM approval_requests WHERE %s ORDER BY created_at DESC LIMIT ? OFFSET ?", strings.Join(where, " AND "))
+	rows, err := s.db.Query(query, append(args, limit, offset)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var out []models.ApprovalRequest
+	for rows.Next() {
+		var req models.ApprovalRequest
+		var metaStr, ca string
+		var approvedAt, expiresAt *string
+		if err := rows.Scan(&req.RequestID, &req.AgentID, &req.FamilyGroupID, &req.Action, &req.ResourceRef, &req.RiskScore, &req.Tier, &req.Status, &req.RequestedBy, &req.ApprovedBy, &approvedAt, &expiresAt, &metaStr, &ca); err != nil {
+			return out, total, err
+		}
+		req.ApprovedAt = parseTimePtr(approvedAt)
+		req.ExpiresAt = parseTimePtr(expiresAt)
+		req.CreatedAt, _ = time.Parse(time.RFC3339Nano, ca)
+		if metaStr != "" && metaStr != "{}" {
+			_ = json.Unmarshal([]byte(metaStr), &req.Metadata)
+		}
+		out = append(out, req)
+	}
+	return out, total, rows.Err()
+}
+
+func (s *SQLiteStore) UpdateApprovalRequest(_ context.Context, req models.ApprovalRequest) error {
+	meta, _ := json.Marshal(req.Metadata)
+	_, err := s.db.Exec(
+		`UPDATE approval_requests SET agent_id=?, family_group_id=?, action=?, resource_ref=?, risk_score=?, tier=?, status=?, requested_by=?, approved_by=?, approved_at=?, expires_at=?, metadata_json=? WHERE request_id=?`,
+		req.AgentID, req.FamilyGroupID, req.Action, req.ResourceRef, req.RiskScore, req.Tier, req.Status, req.RequestedBy, req.ApprovedBy, formatTime(req.ApprovedAt), formatTime(req.ExpiresAt), string(meta), req.RequestID,
+	)
+	return err
 }
