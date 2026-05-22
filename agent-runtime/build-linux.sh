@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Cross-compile agent-runtime for Linux (static musl binary + eBPF bytecode).
+# Includes --features checkpoint for Track A checkpoint/rollback support.
 #
 # Uses a persistent Docker container (agentshield-build) with all toolchains
 # pre-installed. First run builds the image (~5 min), subsequent runs skip that.
@@ -62,10 +63,11 @@ cargo +nightly build -p agentshield-ebpf \
 ls -lh /build/target/bpfel-unknown-none/release/agentshield-ebpf
 
 # ── agent-runtime (musl static) ──
-echo "--- Building agent-runtime (musl static) ---"
+echo "--- Building agent-runtime (musl static + checkpoint) ---"
 cargo build -p agent-runtime \
     --target x86_64-unknown-linux-musl \
-    --release
+    --release \
+    --features checkpoint
 
 ls -lh /build/target/x86_64-unknown-linux-musl/release/agent-runtime
 '
